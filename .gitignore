@@ -1,0 +1,27 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+data/
+demo-evidence/
+*.egg-info/
+# Local configuration and credentials. Keep examples placeholder-only.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+secrets/
+.aws/
+.ssh/
+
+# Operating system files
+.DS_Store
+Thumbs.db
