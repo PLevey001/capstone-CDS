@@ -1,5 +1,7 @@
 import asyncio
+import csv
 import hashlib
+import io
 from pathlib import Path
 
 import httpx
@@ -229,3 +231,30 @@ def test_cleanup_does_not_follow_links_or_escape_storage(tmp_path):
     assert store.cleanup_deleted_files() == 1
     assert original.read_bytes() == b"original"
     assert not link.exists()
+
+def test_export_returns_csv_and_json_with_provenance(tmp_path):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    with TestClient(app) as client:
+        case = create_case(client, "Export case")
+        upload(client, case["id"])
+        finish_job(app.state.store)
+        route = f"/api/cases/{case['id']}/export"
+        digest = hashlib.sha256(b"test evidence").hexdigest()
+
+        response = client.get(route, params={"format": "csv"})
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/csv")
+        assert f'filename="cds-case-{case["id"][:8]}.csv"' in response.headers["content-disposition"]
+        rows = list(csv.DictReader(io.StringIO(response.text)))
+        assert len(rows) == 1
+        assert rows[0]["source_name"] == "source.txt"
+        assert rows[0]["source_sha256"] == digest
+        assert rows[0]["artifact_path"] == "/source.txt"
+
+        payload = client.get(route, params={"format": "json"}).json()
+        assert payload["case"]["name"] == "Export case"
+        assert [item["artifact_path"] for item in payload["items"]] == ["/source.txt"]
+        assert payload["items"][0]["source_sha256"] == digest
+
+        assert client.get(route, params={"format": "xml"}).status_code == 422
+        assert client.get("/api/cases/missing/export").status_code == 404
