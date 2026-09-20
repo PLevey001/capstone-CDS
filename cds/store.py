@@ -219,6 +219,50 @@ class Store:
                               (evidence_id, pattern, limit, offset))
             return {"total": count, "items": [self.decode(row) for row in rows]}
 
+    def export_rows(self, case_id):
+        """Flatten every artifact in a case into export-ready rows."""
+        with self.connect() as db:
+            case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+            if case is None:
+                return None
+            rows = db.execute("""
+                SELECT e.name AS source_name, e.kind AS source_kind,
+                       e.sha256 AS source_sha256, e.imported_at,
+                       a.path, a.kind, a.size, a.deleted,
+                       a.partition_offset, a.metadata_address, a.details
+                FROM artifacts a JOIN evidence e ON e.id = a.evidence_id
+                WHERE e.case_id = ?
+                ORDER BY e.imported_at DESC, a.id
+            """, (case_id,)).fetchall()
+
+        items = []
+        for row in rows:
+            details = json.loads(row["details"])
+            items.append({
+                "source_name": row["source_name"],
+                "source_kind": row["source_kind"],
+                "source_sha256": row["source_sha256"],
+                "imported_at": row["imported_at"],
+                "artifact_path": row["path"],
+                "artifact_kind": row["kind"],
+                "size": row["size"],
+                "deleted": bool(row["deleted"]),
+                "partition_offset": row["partition_offset"],
+                "metadata_address": row["metadata_address"],
+                "artifact_sha256": details.get("sha256"),
+                "parser": details.get("parser"),
+            })
+
+        return {
+            "case": {
+                "id": case["id"],
+                "name": case["name"],
+                "description": case["description"],
+                "created_at": case["created_at"],
+            },
+            "items": items,
+        }
+
     def audit(self, case_id):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
