@@ -292,6 +292,13 @@ export default function App() {
                     <Trash2 size={15} />
                     Delete case
                   </button>
+                  <a
+                    className="secondary-button"
+                    href={`/api/cases/${currentCase.id}/export?format=csv`}
+                  >
+                    <ArrowDownToLine size={15} />
+                    Export CSV
+                  </a>
                 </>
               )}
               <button
