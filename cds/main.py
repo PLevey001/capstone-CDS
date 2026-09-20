@@ -1,4 +1,7 @@
 import asyncio
+import csv
+import io
+import json
 import os
 import shutil
 import threading
@@ -8,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
@@ -200,6 +203,36 @@ def create_app(settings=None, start_workers=True):
     def audit(case_id: str):
         require_case(case_id)
         return store.audit(case_id)
+
+    EXPORT_COLUMNS = ["source_name", "source_kind", "source_sha256", "imported_at",
+                      "artifact_path", "artifact_kind", "size", "deleted",
+                      "partition_offset", "metadata_address", "artifact_sha256", "parser"]
+
+    @app.get("/api/cases/{case_id}/export")
+    def export_case(case_id: str, format: str = Query(default="csv", pattern="^(csv|json)$")):
+        """Download every artifact in a case as CSV or JSON, with source hashes."""
+        require_case(case_id)
+        data = store.export_rows(case_id)
+        if data is None:
+            raise HTTPException(404, "Case not found")
+
+        stem = f"cds-case-{case_id[:8]}"
+
+        if format == "json":
+            body = json.dumps(data, indent=2)
+            media_type = "application/json"
+            filename = f"{stem}.json"
+        else:
+            buffer = io.StringIO()
+            writer = csv.DictWriter(buffer, fieldnames=EXPORT_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(data["items"])
+            body = buffer.getvalue()
+            media_type = "text/csv"
+            filename = f"{stem}.csv"
+
+        return Response(content=body, media_type=media_type,
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     frontend = Path(__file__).resolve().parents[1] / "frontend" / "dist"
     if (frontend / "assets").exists():
