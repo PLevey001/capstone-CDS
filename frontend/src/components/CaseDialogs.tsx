@@ -115,9 +115,9 @@ export function DeleteCase({
       >
         <p className="modal-description">
           Permanently delete <strong className="case-name">{item.name}</strong>{" "}
-          and all of its stored evidence copies, findings, jobs, and activity
-          records. Original files you uploaded from stay in their original
-          locations. This cannot be undone.
+          and all of its stored evidence copies, analysis history, findings,
+          jobs, and activity records. Original files you uploaded from stay in
+          their original locations. This cannot be undone.
         </p>
         {processing && (
           <p className="notice" role="status">

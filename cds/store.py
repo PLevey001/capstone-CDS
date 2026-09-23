@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from cds.migrations import migrate_history
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,6 +80,7 @@ class Store:
                     path TEXT PRIMARY KEY, case_id TEXT NOT NULL
                 );
             """)
+            migrate_history(db)
         self.cleanup_deleted_files()
 
     @staticmethod
@@ -129,12 +132,17 @@ class Store:
                 raise CaseBusyError("Wait for queued and running analyses to finish before deleting this case.")
             sources = db.execute("SELECT id FROM evidence WHERE case_id=?", (case_id,)).fetchall()
             # Paths come from generated IDs, never from a displayed case/file name.
-            paths = [f"evidence/{row['id']}" for row in sources] + [f"work/{job['id']}" for job in jobs]
+            runs = db.execute("SELECT id FROM analysis_runs WHERE evidence_id IN (SELECT id FROM evidence WHERE case_id=?)",
+                              (case_id,)).fetchall()
+            paths = list(dict.fromkeys([f"evidence/{row['id']}" for row in sources]
+                         + [f"work/{job['id']}" for job in jobs] + [f"work/{run['id']}" for run in runs]))
             db.executemany("INSERT INTO pending_deletions(path,case_id) VALUES(?,?)",
                            [(path, case_id) for path in paths])
             for table in ("artifacts", "partitions", "jobs"):
                 db.execute(f"DELETE FROM {table} WHERE evidence_id IN (SELECT id FROM evidence WHERE case_id=?)",
                            (case_id,))
+            db.execute("UPDATE evidence SET result_run_id=NULL WHERE case_id=?", (case_id,))
+            db.execute("DELETE FROM analysis_runs WHERE evidence_id IN (SELECT id FROM evidence WHERE case_id=?)", (case_id,))
             db.execute("DELETE FROM audit WHERE case_id=?", (case_id,))
             db.execute("DELETE FROM evidence WHERE case_id=?", (case_id,))
             db.execute("DELETE FROM cases WHERE id=?", (case_id,))
@@ -183,85 +191,135 @@ class Store:
     @staticmethod
     def decode(row):
         item = dict(row)
-        for key in ("metadata", "warnings", "details"):
-            if key in item:
+        for key in ("metadata", "warnings", "details", "coverage", "settings"):
+            if key in item and item[key] is not None:
                 item[key] = json.loads(item[key])
+        if "legacy" in item:
+            item["legacy"] = bool(item["legacy"])
         item.pop("source_path", None)
         return item
 
     def evidence(self, case_id):
         with self.connect() as db:
             return [self.decode(row) for row in db.execute("""
-                SELECT e.*,j.id AS job_id,j.status,j.stage,j.progress,j.started_at,j.finished_at,j.error,
-                  (SELECT COUNT(*) FROM artifacts a WHERE a.evidence_id=e.id) AS artifact_count
+                SELECT e.*,e.result_run_id AS run_id,j.id AS job_id,j.status,j.stage,j.progress,
+                  j.started_at,j.finished_at,j.error,j.active_run_id,j.status AS current_job_status,
+                  (SELECT COUNT(*) FROM artifacts a WHERE a.evidence_id=e.id AND a.run_id=e.result_run_id) AS artifact_count,
+                  (SELECT COUNT(*) FROM analysis_runs r WHERE r.evidence_id=e.id) AS run_count
                 FROM evidence e JOIN jobs j ON j.evidence_id=e.id
                 WHERE e.case_id=? ORDER BY e.imported_at DESC
             """, (case_id,))]
 
-    def detail(self, evidence_id):
+    def detail(self, evidence_id, run_id=None):
         with self.connect() as db:
-            row = db.execute("""SELECT e.*,j.status,j.stage,j.progress,j.error,j.started_at,j.finished_at
+            db.execute("BEGIN")
+            row = db.execute("""SELECT e.*,e.result_run_id AS run_id,j.status,j.stage,j.progress,j.error,
+                j.started_at,j.finished_at,j.active_run_id,j.status AS current_job_status,
+                (SELECT COUNT(*) FROM analysis_runs r WHERE r.evidence_id=e.id) AS run_count
                 FROM evidence e JOIN jobs j ON j.evidence_id=e.id WHERE e.id=?""", (evidence_id,)).fetchone()
             if not row:
                 return None
             item = self.decode(row)
+            selected = run_id or item["result_run_id"]
+            run = db.execute("SELECT * FROM analysis_runs WHERE evidence_id=? AND id=?",
+                             (evidence_id, selected)).fetchone()
+            if run_id and run is None:
+                return None
+            item["run"] = self.decode(run) if run else None
+            if run_id:
+                for key in ("status", "stage", "progress", "error", "started_at", "finished_at",
+                            "sha256", "metadata", "warnings", "coverage"):
+                    item[key] = item["run"][key]
+                item["run_id"] = run_id
             item["partitions"] = [dict(p) for p in db.execute(
-                "SELECT * FROM partitions WHERE evidence_id=? ORDER BY start_sector", (evidence_id,))]
+                "SELECT * FROM partitions WHERE evidence_id=? AND run_id=? ORDER BY start_sector", (evidence_id, selected))]
+            item["artifact_count"] = db.execute(
+                "SELECT COUNT(*) FROM artifacts WHERE evidence_id=? AND run_id=?", (evidence_id, selected)).fetchone()[0]
             return item
 
-    def artifacts(self, evidence_id, query, offset, limit):
+    def runs(self, evidence_id):
+        with self.connect() as db:
+            rows = db.execute("""SELECT r.*,
+                (SELECT COUNT(*) FROM artifacts a WHERE a.evidence_id=r.evidence_id AND a.run_id=r.id) AS artifact_count
+                FROM analysis_runs r WHERE evidence_id=? ORDER BY sequence DESC""", (evidence_id,)).fetchall()
+            items = []
+            for row in rows:
+                item = self.decode(row)
+                item["coverage_status"] = (item.pop("coverage") or {}).get("status", "unknown")
+                metadata = item.pop("metadata")
+                item["parser_version"] = metadata.get("parser_version")
+                item["tool_version"] = metadata.get("sleuthkit_version")
+                item.pop("warnings")
+                items.append(item)
+            return items
+
+    def artifacts(self, evidence_id, query, offset, limit, run_id=None):
         # Treat user searches literally, including SQL LIKE wildcard characters.
         pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
-        where = "evidence_id=? AND path LIKE ? ESCAPE '\\'"
         with self.connect() as db:
-            count = db.execute(f"SELECT COUNT(*) FROM artifacts WHERE {where}", (evidence_id, pattern)).fetchone()[0]
+            db.execute("BEGIN")
+            evidence = db.execute("SELECT result_run_id FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+            selected = run_id or (evidence["result_run_id"] if evidence else None)
+            where = "evidence_id=? AND run_id=? AND path LIKE ? ESCAPE '\\'"
+            params = (evidence_id, selected, pattern)
+            count = db.execute(f"SELECT COUNT(*) FROM artifacts WHERE {where}", params).fetchone()[0]
             rows = db.execute(f"SELECT * FROM artifacts WHERE {where} ORDER BY id LIMIT ? OFFSET ?",
-                              (evidence_id, pattern, limit, offset))
-            return {"total": count, "items": [self.decode(row) for row in rows]}
+                              (*params, limit, offset))
+            return {"run_id": selected, "total": count, "items": [self.decode(row) for row in rows]}
 
-    def export_rows(self, case_id):
-        """Flatten every artifact in a case into export-ready rows."""
+    def artifact(self, evidence_id, artifact_id):
         with self.connect() as db:
+            row = db.execute("SELECT * FROM artifacts WHERE evidence_id=? AND id=?", (evidence_id, artifact_id)).fetchone()
+            return self.decode(row) if row else None
+
+    def export_rows(self, case_id, run_id=None):
+        """Export the latest results per source, or one selected historical run."""
+        with self.connect() as db:
+            db.execute("BEGIN")
             case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
             if case is None:
                 return None
-            rows = db.execute("""
-                SELECT e.name AS source_name, e.kind AS source_kind,
-                       e.sha256 AS source_sha256, e.imported_at,
-                       a.path, a.kind, a.size, a.deleted,
-                       a.partition_offset, a.metadata_address, a.details
-                FROM artifacts a JOIN evidence e ON e.id = a.evidence_id
-                WHERE e.case_id = ?
-                ORDER BY e.imported_at DESC, a.id
-            """, (case_id,)).fetchall()
-
-        items = []
-        for row in rows:
-            details = json.loads(row["details"])
-            items.append({
-                "source_name": row["source_name"],
-                "source_kind": row["source_kind"],
-                "source_sha256": row["source_sha256"],
-                "imported_at": row["imported_at"],
-                "artifact_path": row["path"],
-                "artifact_kind": row["kind"],
-                "size": row["size"],
-                "deleted": bool(row["deleted"]),
-                "partition_offset": row["partition_offset"],
-                "metadata_address": row["metadata_address"],
-                "artifact_sha256": details.get("sha256"),
-                "parser": details.get("parser"),
-            })
-
-        return {
-            "case": {
-                "id": case["id"],
-                "name": case["name"],
-                "description": case["description"],
-                "created_at": case["created_at"],
-            },
-            "items": items,
-        }
+            selection = "r.id=?" if run_id else "r.id=e.result_run_id"
+            params = (run_id, case_id) if run_id else (case_id,)
+            sources = db.execute(f"""SELECT e.id,e.name,e.kind,e.imported_at,e.sha256 AS recorded_sha256,
+                    j.status AS current_job_status,r.id AS run_id,r.sequence,r.status AS run_status,
+                    r.started_at,r.finished_at,r.sha256,r.metadata,r.warnings,r.coverage,r.settings,r.error,r.legacy
+                FROM evidence e JOIN jobs j ON j.evidence_id=e.id
+                LEFT JOIN analysis_runs r ON r.evidence_id=e.id AND {selection}
+                WHERE e.case_id=? {"AND r.id IS NOT NULL" if run_id else ""}
+                ORDER BY e.imported_at DESC""", params).fetchall()
+            if run_id and not sources:
+                return None
+            evidence = []
+            items = []
+            for source in sources:
+                entry = self.decode(source)
+                entry["job_status"] = entry["run_status"] or entry["current_job_status"]
+                if entry["run_id"] is None:
+                    entry["sha256"] = entry["recorded_sha256"]
+                entry["partitions"] = [dict(row) for row in db.execute(
+                    "SELECT * FROM partitions WHERE evidence_id=? AND run_id=? ORDER BY start_sector",
+                    (entry["id"], entry["run_id"]))]
+                evidence.append(entry)
+                coverage = entry["coverage"] or {}
+                for row in db.execute("SELECT * FROM artifacts WHERE evidence_id=? AND run_id=? ORDER BY id",
+                                      (entry["id"], entry["run_id"])):
+                    details = json.loads(row["details"])
+                    items.append({
+                        "evidence_id": entry["id"], "run_id": entry["run_id"], "run_number": entry["sequence"],
+                        "artifact_id": row["id"], "job_status": entry["job_status"],
+                        "current_job_status": entry["current_job_status"],
+                        "coverage_status": coverage.get("status", "unknown"),
+                        "coverage_run_id": coverage.get("run_id"),
+                        "source_name": entry["name"], "source_kind": entry["kind"],
+                        "source_sha256": entry["sha256"], "imported_at": entry["imported_at"],
+                        "artifact_path": row["path"], "artifact_kind": row["kind"],
+                        "size": row["size"], "deleted": bool(row["deleted"]),
+                        "partition_offset": row["partition_offset"], "metadata_address": row["metadata_address"],
+                        "artifact_sha256": details.get("sha256"), "parser": details.get("parser"), "details": details,
+                    })
+            return {"case": dict(case), "selection": "selected_run" if run_id else "latest_saved_results",
+                    "items": items, "evidence": evidence}
 
     def audit(self, case_id):
         with self.connect() as db:
@@ -270,47 +328,91 @@ class Store:
 
     def recover_interrupted(self):
         with self.connect() as db:
-            for row in db.execute("""SELECT j.id,e.id AS evidence_id,e.case_id FROM jobs j
+            db.execute("BEGIN IMMEDIATE")
+            for row in db.execute("""SELECT j.*,e.id AS evidence_id,e.case_id FROM jobs j
                 JOIN evidence e ON e.id=j.evidence_id WHERE j.status='running'""").fetchall():
-                db.execute("UPDATE jobs SET status='queued',stage='Requeued after restart',progress=0 WHERE id=?", (row["id"],))
-                self.event(db, row["case_id"], "analysis_requeued", "Previous run was interrupted", row["evidence_id"])
+                run_id = row["active_run_id"]
+                if not run_id:
+                    run_id = str(uuid4())
+                    sequence = db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM analysis_runs WHERE evidence_id=?",
+                                          (row["evidence_id"],)).fetchone()[0]
+                    db.execute("""INSERT INTO analysis_runs
+                        (id,evidence_id,sequence,status,stage,progress,started_at,legacy)
+                        VALUES(?,?,?,'running',?,?,?,1)""",
+                        (run_id, row["evidence_id"], sequence, row["stage"], row["progress"], row["started_at"]))
+                db.execute("""UPDATE analysis_runs SET status='interrupted',stage='Interrupted',finished_at=?,
+                    error='Analysis stopped before results were saved; a new attempt was queued.'
+                    WHERE id=? AND status='running'""", (now(), run_id))
+                db.execute("""UPDATE jobs SET status='queued',stage='Requeued after restart',progress=0,
+                    active_run_id=NULL,started_at=NULL,finished_at=NULL,error=NULL WHERE id=?""", (row["id"],))
+                self.event(db, row["case_id"], "analysis_requeued", f"Run {run_id} was interrupted", row["evidence_id"])
 
-    def claim(self):
+    def claim(self, settings=None, parser_version=None):
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("""SELECT j.id AS job_id,e.* FROM jobs j JOIN evidence e ON e.id=j.evidence_id
                 WHERE j.status='queued' ORDER BY j.created_at LIMIT 1""").fetchone()
             if row is None:
                 return None
-            db.execute("UPDATE jobs SET status='running',stage='Starting',started_at=?,finished_at=NULL,error=NULL WHERE id=?",
-                       (now(), row["job_id"]))
-            self.event(db, row["case_id"], "analysis_started", f"{row['name']}: worker dispatched", row["id"])
-            return dict(row)
+            run_id, started = str(uuid4()), now()
+            sequence = db.execute("SELECT COALESCE(MAX(sequence),0)+1 FROM analysis_runs WHERE evidence_id=?",
+                                  (row["id"],)).fetchone()[0]
+            run_settings = {**(settings or {}), "source_kind": row["kind"], "sector_size": row["sector_size"]}
+            metadata = {"parser_version": parser_version} if parser_version else {}
+            db.execute("""INSERT INTO analysis_runs(id,evidence_id,sequence,status,stage,started_at,settings,metadata)
+                VALUES(?,?,?,'running','Starting',?,?,?)""",
+                (run_id, row["id"], sequence, started, json.dumps(run_settings), json.dumps(metadata)))
+            db.execute("""UPDATE jobs SET status='running',stage='Starting',progress=0,started_at=?,
+                finished_at=NULL,error=NULL,active_run_id=? WHERE id=?""", (started, run_id, row["job_id"]))
+            self.event(db, row["case_id"], "analysis_started", f"{row['name']}: run {sequence} ({run_id}) dispatched", row["id"])
+            return {**dict(row), "run_id": run_id}
 
     def progress(self, job_id, stage, progress):
         with self.connect() as db:
-            db.execute("UPDATE jobs SET stage=?,progress=? WHERE id=? AND status='running'",
-                       (stage, progress, job_id))
+            db.execute("UPDATE jobs SET stage=?,progress=? WHERE id=? AND status='running'", (stage, progress, job_id))
+            db.execute("""UPDATE analysis_runs SET stage=?,progress=? WHERE status='running' AND id=(
+                SELECT active_run_id FROM jobs WHERE id=? AND status='running')""", (stage, progress, job_id))
 
     def finish(self, job, result):
         with self.connect() as db:
-            evidence_id = job["id"]
-            db.execute("UPDATE evidence SET sha256=?,metadata=?,warnings=? WHERE id=?",
-                       (result.get("sha256"), json.dumps(result.get("metadata", {})), json.dumps(result.get("warnings", [])), evidence_id))
-            db.execute("DELETE FROM artifacts WHERE evidence_id=?", (evidence_id,))
-            db.execute("DELETE FROM partitions WHERE evidence_id=?", (evidence_id,))
+            db.execute("BEGIN IMMEDIATE")
+            evidence_id, run_id = job["id"], job["run_id"]
+            current = db.execute("""SELECT r.* FROM jobs j JOIN analysis_runs r ON r.id=j.active_run_id
+                WHERE j.id=? AND j.status='running' AND r.id=? AND r.status='running'""",
+                (job["job_id"], run_id)).fetchone()
+            if current is None:
+                return False  # Ignore duplicate or late results from an interrupted attempt.
+            coverage = result.get("coverage") or {
+                "schema_version": 1, "run_id": run_id, "status": "unknown",
+                "started_at": current["started_at"], "finished_at": now(), "steps": [], "limits": {},
+                "scope": "No coverage measurements were returned for this analysis.",
+            }
+            coverage = {**coverage, "run_id": run_id}
+            digest = result.get("sha256", job.get("sha256"))
+            metadata = json.dumps(result.get("metadata", json.loads(current["metadata"])))
+            warnings = json.dumps(result.get("warnings", []))
+            saved_coverage = json.dumps(coverage)
+            error, finished = result.get("error"), now()
+            status, stage = ("failed", "Failed") if error else ("completed", "Complete")
+            settings = json.dumps({**json.loads(current["settings"]), **coverage.get("limits", {})})
+            db.execute("""UPDATE analysis_runs SET status=?,stage=?,progress=100,finished_at=?,sha256=?,
+                metadata=?,warnings=?,coverage=?,settings=?,error=? WHERE id=?""",
+                (status, stage, finished, digest, metadata, warnings, saved_coverage, settings, error, run_id))
+            db.execute("UPDATE evidence SET sha256=?,metadata=?,warnings=?,coverage=?,result_run_id=? WHERE id=?",
+                       (digest, metadata, warnings, saved_coverage, run_id, evidence_id))
             for item in result.get("artifacts", []):
-                db.execute("""INSERT INTO artifacts(evidence_id,path,kind,size,deleted,partition_offset,metadata_address,details)
-                    VALUES(?,?,?,?,?,?,?,?)""", (evidence_id, item["path"], item["kind"], item.get("size"),
+                db.execute("""INSERT INTO artifacts(evidence_id,run_id,path,kind,size,deleted,partition_offset,metadata_address,details)
+                    VALUES(?,?,?,?,?,?,?,?,?)""", (evidence_id, run_id, item["path"], item["kind"], item.get("size"),
                     int(item.get("deleted", False)), item.get("partition_offset"), item.get("metadata_address"), json.dumps(item.get("details", {}))))
             for p in result.get("partitions", []):
-                db.execute("""INSERT INTO partitions(evidence_id,slot,start_sector,length_sectors,sector_size,description)
-                    VALUES(?,?,?,?,?,?)""", (evidence_id, p["slot"], p["start_sector"], p["length_sectors"], p["sector_size"], p["description"]))
-            error = result.get("error")
-            db.execute("UPDATE jobs SET status=?,stage=?,progress=?,finished_at=?,error=? WHERE id=?",
-                       ("failed" if error else "completed", "Failed" if error else "Complete", 100, now(), error, job["job_id"]))
+                db.execute("""INSERT INTO partitions(evidence_id,run_id,slot,start_sector,length_sectors,sector_size,description)
+                    VALUES(?,?,?,?,?,?,?)""", (evidence_id, run_id, p["slot"], p["start_sector"], p["length_sectors"], p["sector_size"], p["description"]))
+            db.execute("""UPDATE jobs SET status=?,stage=?,progress=100,finished_at=?,error=?,active_run_id=NULL
+                WHERE id=?""", (status, stage, finished, error, job["job_id"]))
             self.event(db, job["case_id"], "analysis_failed" if error else "analysis_completed",
-                       f"{job['name']}: " + (error or f"{len(result.get('artifacts', []))} artifacts indexed"), evidence_id)
+                       f"{job['name']}: run {current['sequence']} ({run_id}): " +
+                       (error or f"{len(result.get('artifacts', []))} artifacts indexed"), evidence_id)
+            return True
 
     def retry(self, evidence_id):
         with self.connect() as db:
@@ -319,7 +421,7 @@ class Store:
             if not row:
                 return False
             changed = db.execute("""UPDATE jobs SET status='queued',stage='Queued',progress=0,error=NULL,
-                started_at=NULL,finished_at=NULL WHERE evidence_id=? AND status='failed'""", (evidence_id,)).rowcount
+                started_at=NULL,finished_at=NULL WHERE evidence_id=? AND status IN ('failed','completed')""", (evidence_id,)).rowcount
             if changed:
                 self.event(db, row["case_id"], "analysis_retried", "Manual retry requested", evidence_id)
             return bool(changed)
