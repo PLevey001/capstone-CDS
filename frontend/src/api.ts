@@ -1,9 +1,60 @@
+export type Coverage = {
+  schema_version: number;
+  run_id: string;
+  status: "complete" | "partial" | "failed" | "unknown";
+  started_at: string | null;
+  finished_at: string | null;
+  scope: string;
+  tool_version?: string;
+  limits: Record<string, number>;
+  steps: {
+    id: string;
+    label: string;
+    parser: string;
+    status:
+      "complete" | "partial" | "failed" | "skipped" | "unsupported" | "unknown";
+    reason: string;
+    detail: string;
+    processed: number;
+    total: number | null;
+    unit: string;
+    partition_offset?: number;
+    sector_size?: number;
+    records_returned?: number;
+    malformed_records?: number;
+  }[];
+};
 export type Case = {
   id: string;
   name: string;
   description: string;
   created_at: string;
   evidence_count: number;
+};
+export type JobStatus = "queued" | "running" | "completed" | "failed";
+export type RunStatus = JobStatus | "interrupted" | "unknown";
+export type AnalysisRun = {
+  id: string;
+  evidence_id: string;
+  sequence: number;
+  status: RunStatus;
+  started_at: string | null;
+  finished_at: string | null;
+  settings: Record<string, string | number>;
+  error: string | null;
+  legacy: boolean;
+  artifact_count: number;
+  coverage_status: Coverage["status"];
+  parser_version: string | null;
+  tool_version: string | null;
+};
+export type RunSnapshot = Omit<
+  AnalysisRun,
+  "artifact_count" | "coverage_status" | "parser_version" | "tool_version"
+> & {
+  metadata: Record<string, unknown>;
+  coverage: Coverage | null;
+  warnings: string[];
 };
 export type Evidence = {
   id: string;
@@ -12,10 +63,15 @@ export type Evidence = {
   kind: string;
   sector_size: number;
   imported_at: string;
-  status: "queued" | "running" | "completed" | "failed";
+  status: RunStatus;
+  current_job_status: JobStatus;
+  run_id: string | null;
+  active_run_id: string | null;
+  run_count: number;
   progress: number;
   stage: string;
   sha256: string | null;
+  coverage: Coverage | null;
   warnings: string[];
   error: string | null;
   artifact_count: number;
@@ -31,9 +87,14 @@ export type Partition = {
   sector_size: number;
   description: string;
 };
-export type Detail = Evidence & { partitions: Partition[] };
+export type Detail = Evidence & {
+  case_id: string;
+  partitions: Partition[];
+  run: RunSnapshot | null;
+};
 export type Artifact = {
   id: number;
+  run_id: string;
   path: string;
   kind: string;
   size: number;

@@ -6,7 +6,7 @@ import threading
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 
-from cds.analysis import analyze
+from cds.analysis import PARSER_VERSION, analyze
 
 logger = logging.getLogger(__name__)
 
@@ -63,10 +63,10 @@ class Coordinator:
                         except (FileNotFoundError, json.JSONDecodeError):
                             pass
                 while not self.stop_event.is_set() and len(active) < self.settings.workers:
-                    job = self.store.claim()
+                    job = self.store.claim(limits, PARSER_VERSION)
                     if not job:
                         break
-                    work_dir = self.settings.data_dir / "work" / job["job_id"]
+                    work_dir = self.settings.data_dir / "work" / job["run_id"]
                     work_dir.mkdir(exist_ok=True)
                     (work_dir / "progress.json").unlink(missing_ok=True)
                     try:

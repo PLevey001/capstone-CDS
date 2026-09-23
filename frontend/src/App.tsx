@@ -30,6 +30,7 @@ import {
   bytes,
   date,
   type Artifact,
+  type AnalysisRun,
   type Audit,
   type Case,
   type Detail,
@@ -37,7 +38,16 @@ import {
   type Health,
 } from "./api";
 import Modal from "./components/Modal";
+import AnalysisHistory from "./components/AnalysisHistory";
 import { DeleteCase, RenameCase } from "./components/CaseDialogs";
+
+import {
+  CoverageBadge,
+  CoverageDetails,
+  CoverageSummary,
+  coverageState,
+  type CoverageFilter,
+} from "./components/Coverage";
 
 type Tab = "evidence" | "activity";
 type UploadItem = { name: string; status: string; failed?: boolean };
@@ -55,7 +65,7 @@ function Status({ value }: { value: Evidence["status"] }) {
         <span className="status-dot" />
       )}
       {value === "completed"
-        ? "Complete"
+        ? "Finished"
         : value[0].toUpperCase() + value.slice(1)}
     </span>
   );
@@ -72,6 +82,9 @@ export default function App() {
   const [tab, setTab] = useState<Tab>("evidence");
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
+  const [coverageFilter, setCoverageFilter] = useState<CoverageFilter | "all">(
+    "all",
+  );
   const [showCreate, setShowCreate] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [selected, setSelected] = useState("");
@@ -103,6 +116,7 @@ export default function App() {
     setEvidence([]);
     setAudit([]);
     setSelected("");
+    setCoverageFilter("all");
     if (!caseId) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -139,7 +153,8 @@ export default function App() {
   const shown = evidence.filter(
     (e) =>
       e.name.toLowerCase().includes(query.toLowerCase()) &&
-      (filter === "all" || e.status === filter),
+      (filter === "all" || e.status === filter) &&
+      (coverageFilter === "all" || coverageState(e) === coverageFilter),
   );
 
   return (
@@ -299,6 +314,12 @@ export default function App() {
                     <ArrowDownToLine size={15} />
                     Export CSV
                   </a>
+                  <a
+                    className="secondary-button"
+                    href={`/api/cases/${currentCase.id}/export?format=json`}
+                  >
+                    Export JSON
+                  </a>
                 </>
               )}
               <button
@@ -323,10 +344,10 @@ export default function App() {
               }
             />
             <Stat
-              label="Analysis complete"
+              label="Jobs finished"
               value={completed}
               icon={<ShieldCheck size={19} />}
-              foot="Hashed and indexed"
+              foot="Check measured scope below"
             />
             <Stat
               label="Processing"
@@ -341,10 +362,15 @@ export default function App() {
               foot={
                 failed
                   ? `${failed} source${failed > 1 ? "s" : ""} need attention`
-                  : "Ready for review"
+                  : "Records within examined scope"
               }
             />
           </div>
+          <CoverageSummary
+            evidence={evidence}
+            value={coverageFilter}
+            onChange={setCoverageFilter}
+          />
           <section className="evidence-panel">
             <div className="panel-tabs">
               <button
@@ -388,7 +414,7 @@ export default function App() {
                       <option value="all">All statuses</option>
                       <option value="queued">Queued</option>
                       <option value="running">Running</option>
-                      <option value="completed">Complete</option>
+                      <option value="completed">Finished</option>
                       <option value="failed">Failed</option>
                     </select>
                   </div>
@@ -405,7 +431,8 @@ export default function App() {
                         <tr>
                           <th>NAME / SOURCE</th>
                           <th>SIZE</th>
-                          <th>STATUS</th>
+                          <th>JOB STATUS</th>
+                          <th>COVERAGE</th>
                           <th>ARTIFACTS</th>
                           <th>IMPORTED</th>
                           <th>
@@ -469,6 +496,9 @@ export default function App() {
                                 </small>
                               )}
                             </td>
+                            <td>
+                              <CoverageBadge evidence={item} />
+                            </td>
                             <td className="mono">
                               {item.artifact_count.toLocaleString()}
                             </td>
@@ -501,18 +531,18 @@ export default function App() {
                       </span>
                     </div>
                     <h2>
-                      {query || filter !== "all"
+                      {query || filter !== "all" || coverageFilter !== "all"
                         ? "No matching evidence"
                         : "Every investigation starts with evidence."}
                     </h2>
                     <p>
-                      {query || filter !== "all"
-                        ? "Try another filename or status."
+                      {query || filter !== "all" || coverageFilter !== "all"
+                        ? "Try another filename, job status, or coverage filter."
                         : currentCase
                           ? "Add files or raw disk images to start hashing and analysis.\nMultiple sources can be processed at the same time."
                           : "Create your first case, then add files or disk images.\nYour analysis and findings will appear here."}
                     </p>
-                    {!query && filter === "all" && (
+                    {!query && filter === "all" && coverageFilter === "all" && (
                       <button
                         className="primary-button"
                         onClick={() =>
@@ -956,6 +986,8 @@ function EvidenceDrawer({
   const [error, setError] = useState(""),
     [expanded, setExpanded] = useState<number | null>(null);
   const [retrying, setRetrying] = useState(false);
+  const [selectedRun, setSelectedRun] = useState("");
+  const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     ref.current?.showModal();
@@ -965,14 +997,24 @@ function EvidenceDrawer({
     let timer: ReturnType<typeof setTimeout>;
     const refresh = async () => {
       try {
-        const [item, rows] = await Promise.all([
-          api<Detail>(`/evidence/${id}`),
-          api<{ total: number; items: Artifact[] }>(
-            `/evidence/${id}/artifacts?${new URLSearchParams({ q: query, offset: String(offset) })}`,
-          ),
+        const runQuery = selectedRun
+          ? `?${new URLSearchParams({ run_id: selectedRun })}`
+          : "";
+        const [item, history] = await Promise.all([
+          api<Detail>(`/evidence/${id}${runQuery}`),
+          api<AnalysisRun[]>(`/evidence/${id}/runs`),
         ]);
+        if (stopped) return;
+        // Bind artifact retrieval to the snapshot we just loaded. A new run
+        // finishing between requests must not mix old coverage with new rows.
+        const rows = item.run_id
+          ? await api<{ total: number; items: Artifact[] }>(
+              `/evidence/${id}/artifacts?${new URLSearchParams({ q: query, offset: String(offset), run_id: item.run_id })}`,
+            )
+          : { total: 0, items: [] };
         if (!stopped) {
           setDetail(item);
+          setRuns(history);
           setArtifacts(rows.items);
           setTotal(rows.total);
           setError("");
@@ -987,7 +1029,7 @@ function EvidenceDrawer({
       stopped = true;
       clearTimeout(timer);
     };
-  }, [id, revision, query, offset]);
+  }, [id, revision, query, offset, selectedRun]);
   return (
     <dialog
       ref={ref}
@@ -1032,14 +1074,35 @@ function EvidenceDrawer({
               </p>
             </div>
           </div>
+          <AnalysisHistory
+            detail={detail}
+            runs={runs}
+            selected={selectedRun}
+            onSelect={(runId) => {
+              setSelectedRun(runId);
+              setOffset(0);
+              setQuery("");
+              setExpanded(null);
+              setDetail(null);
+              setArtifacts([]);
+            }}
+          />
           <Status value={detail.status} />
           <p className="stage-label">
-            {detail.stage}
+            {detail.status === "completed"
+              ? "Processing finished"
+              : detail.stage}
             {detail.status === "running" ? ` · ${detail.progress}%` : ""}
           </p>
           {detail.error && (
             <div className="error-detail">
               <p>{detail.error}</p>
+            </div>
+          )}
+          <CoverageDetails evidence={detail} />
+          {(detail.current_job_status === "failed" ||
+            detail.current_job_status === "completed") && (
+            <div className="reanalyze-control">
               <button
                 className="secondary-button"
                 disabled={retrying}
@@ -1049,10 +1112,14 @@ function EvidenceDrawer({
                     await api(`/evidence/${id}/retry`, { method: "POST" });
                     setDetail({
                       ...detail,
-                      status: "queued",
-                      stage: "Queued",
-                      error: null,
+                      status: selectedRun ? detail.status : "queued",
+                      current_job_status: "queued",
+                      stage: selectedRun ? detail.stage : "Queued",
+                      progress: selectedRun ? detail.progress : 0,
+                      error: selectedRun ? detail.error : null,
                     });
+                    setOffset(0);
+                    setExpanded(null);
                   } catch (e) {
                     setError((e as Error).message);
                   } finally {
@@ -1060,16 +1127,29 @@ function EvidenceDrawer({
                   }
                 }}
               >
-                Retry analysis
+                {retrying
+                  ? "Queuing…"
+                  : detail.current_job_status === "failed"
+                    ? "Retry analysis"
+                    : "Analyze again"}
               </button>
+              <small>
+                Starts a new run with current settings. All previous results are
+                kept.
+              </small>
             </div>
           )}
           <div className="hash-block">
             <label>
               <Fingerprint size={14} />
-              SHA-256 · stored source
+              SHA-256 · recorded for this result
             </label>
-            <code>{detail.sha256 || "Available after hashing completes"}</code>
+            <code>
+              {detail.sha256 ||
+                (detail.status === "queued" || detail.status === "running"
+                  ? "Available after hashing completes"
+                  : "Not recorded for this run")}
+            </code>
           </div>
           <div className="detail-meta">
             <span>Imported</span>
@@ -1112,7 +1192,11 @@ function EvidenceDrawer({
             <h3>
               Indexed artifacts <span>{total}</span>
             </h3>
-            <span>Source-linked records</span>
+            <span>
+              {detail.status === "queued" || detail.status === "running"
+                ? "Last saved results"
+                : "Source-linked records"}
+            </span>
           </div>
           <div className="search-input artifact-search">
             <Search size={16} />
@@ -1149,6 +1233,9 @@ function EvidenceDrawer({
                 {expanded === a.id && (
                   <div className="artifact-detail">
                     <p>
+                      Run: <code>{a.run_id}</code> · Artifact ID: {a.id}
+                    </p>
+                    <p>
                       Partition sector: {a.partition_offset ?? "N/A"} · Metadata
                       address: {a.metadata_address ?? "N/A"}
                     </p>
@@ -1161,7 +1248,7 @@ function EvidenceDrawer({
               <p className="muted">
                 {detail.status === "running" || detail.status === "queued"
                   ? "Findings will appear when this source finishes."
-                  : "No matching artifacts."}
+                  : "No matching indexed artifacts. Check the coverage above for unexamined scope."}
               </p>
             )}
           </div>

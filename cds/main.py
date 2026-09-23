@@ -178,25 +178,39 @@ def create_app(settings=None, start_workers=True):
                 upload_slots.release()
 
     @app.get("/api/evidence/{evidence_id}")
-    def detail(evidence_id: str):
-        item = store.detail(evidence_id)
+    def detail(evidence_id: str, run_id: str | None = Query(default=None, min_length=1, max_length=64)):
+        item = store.detail(evidence_id, run_id)
         if item is None:
             raise HTTPException(404, "Evidence not found")
         return item
 
-    @app.get("/api/evidence/{evidence_id}/artifacts")
-    def artifacts(evidence_id: str, q: str = Query(default="", max_length=200),
-                  offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=200)):
+    @app.get("/api/evidence/{evidence_id}/runs")
+    def runs(evidence_id: str):
         if store.detail(evidence_id) is None:
             raise HTTPException(404, "Evidence not found")
-        return store.artifacts(evidence_id, q, offset, limit)
+        return store.runs(evidence_id)
+
+    @app.get("/api/evidence/{evidence_id}/artifacts/{artifact_id}")
+    def artifact(evidence_id: str, artifact_id: int):
+        item = store.artifact(evidence_id, artifact_id)
+        if item is None:
+            raise HTTPException(404, "Artifact not found for this evidence")
+        return item
+
+    @app.get("/api/evidence/{evidence_id}/artifacts")
+    def artifacts(evidence_id: str, q: str = Query(default="", max_length=200),
+                  offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=200),
+                  run_id: str | None = Query(default=None, min_length=1, max_length=64)):
+        if store.detail(evidence_id, run_id) is None:
+            raise HTTPException(404, "Evidence not found")
+        return store.artifacts(evidence_id, q, offset, limit, run_id)
 
     @app.post("/api/evidence/{evidence_id}/retry", status_code=202)
     def retry(evidence_id: str):
         if store.detail(evidence_id) is None:
             raise HTTPException(404, "Evidence not found")
         if not store.retry(evidence_id):
-            raise HTTPException(409, "Only failed jobs can be retried")
+            raise HTTPException(409, "Wait for the current analysis to finish before analyzing again")
         return {"status": "queued"}
 
     @app.get("/api/cases/{case_id}/audit")
@@ -204,19 +218,24 @@ def create_app(settings=None, start_workers=True):
         require_case(case_id)
         return store.audit(case_id)
 
-    EXPORT_COLUMNS = ["source_name", "source_kind", "source_sha256", "imported_at",
-                      "artifact_path", "artifact_kind", "size", "deleted",
-                      "partition_offset", "metadata_address", "artifact_sha256", "parser"]
+    EXPORT_COLUMNS = [
+        "evidence_id", "run_id", "run_number", "artifact_id", "job_status", "current_job_status",
+        "coverage_status", "coverage_run_id",
+        "source_name", "source_kind", "source_sha256", "imported_at",
+        "artifact_path", "artifact_kind", "size", "deleted",
+        "partition_offset", "metadata_address", "artifact_sha256", "parser",
+    ]
 
     @app.get("/api/cases/{case_id}/export")
-    def export_case(case_id: str, format: str = Query(default="csv", pattern="^(csv|json)$")):
-        """Download every artifact in a case as CSV or JSON, with source hashes."""
+    def export_case(case_id: str, format: str = Query(default="csv", pattern="^(csv|json)$"),
+                    run_id: str | None = Query(default=None, min_length=1, max_length=64)):
+        """Download latest saved results, or one historical run belonging to this case."""
         require_case(case_id)
-        data = store.export_rows(case_id)
+        data = store.export_rows(case_id, run_id)
         if data is None:
-            raise HTTPException(404, "Case not found")
+            raise HTTPException(404, "Case or analysis run not found")
 
-        stem = f"cds-case-{case_id[:8]}"
+        stem = f"cds-case-{case_id[:8]}" + (f"-run-{run_id}" if run_id else "")
 
         if format == "json":
             body = json.dumps(data, indent=2)
