@@ -110,6 +110,23 @@ export type Audit = {
   at: string;
   evidence_id: string | null;
 };
+export type TimelineEvent = {
+  at: string;
+  timestamp_kind: string;
+  timestamp_label: string;
+  origin: "filesystem" | "import";
+  source_id: string;
+  source_name: string;
+  artifact_id: number | null;
+  artifact_path: string;
+  artifact_kind: string;
+  deleted: boolean;
+};
+export type Timeline = {
+  case: Case;
+  total: number;
+  events: TimelineEvent[];
+};
 export type Health = {
   workers: number;
   coordinator_running: boolean;
