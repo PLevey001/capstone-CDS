@@ -218,6 +218,19 @@ def create_app(settings=None, start_workers=True):
         require_case(case_id)
         return store.audit(case_id)
 
+    @app.get("/api/cases/{case_id}/timeline")
+    def timeline(case_id: str, start: str = Query(default="", max_length=40),
+                 end: str = Query(default="", max_length=40)):
+        """Filesystem timestamps across a case's latest results, in time order.
+
+        Optional start/end are ISO-8601 UTC bounds (inclusive), e.g. 2026-09-20T00:00:00+00:00.
+        """
+        require_case(case_id)
+        data = store.timeline_rows(case_id, start or None, end or None)
+        if data is None:
+            raise HTTPException(404, "Case not found")
+        return data
+
     EXPORT_COLUMNS = [
         "evidence_id", "run_id", "run_number", "artifact_id", "job_status", "current_job_status",
         "coverage_status", "coverage_run_id",
