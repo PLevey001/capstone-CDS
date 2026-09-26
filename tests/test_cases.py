@@ -258,3 +258,48 @@ def test_export_returns_csv_and_json_with_provenance(tmp_path):
 
         assert client.get(route, params={"format": "xml"}).status_code == 422
         assert client.get("/api/cases/missing/export").status_code == 404
+
+
+def test_timeline_orders_filesystem_timestamps_and_falls_back_to_import(tmp_path):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    store = app.state.store
+    with TestClient(app) as client:
+        case = create_case(client, "Timeline case")
+        upload(client, case["id"])
+        job = store.claim()
+        store.finish(job, {"artifacts": [
+            {"path": "/REPORT.TXT", "kind": "file", "deleted": False, "details": {
+                "parser": "sleuthkit/fls",
+                "timestamps_unix": {"accessed": 1700000100, "modified": 1700000200,
+                                    "metadata_changed": 0, "created": 1700000000}}},
+            {"path": "/$MBR", "kind": "file", "deleted": False, "details": {
+                "parser": "sleuthkit/fls",
+                "timestamps_unix": {"accessed": 0, "modified": 0, "metadata_changed": 0, "created": 0}}},
+        ]})
+        route = f"/api/cases/{case['id']}/timeline"
+
+        # Three non-zero MAC times on REPORT.TXT; the zero metadata_changed and the
+        # all-zero $MBR pseudo-file contribute nothing.
+        data = client.get(route).json()
+        assert data["total"] == 3
+        moments = [event["at"] for event in data["events"]]
+        assert moments == sorted(moments)
+        assert {event["timestamp_kind"] for event in data["events"]} == {"created", "accessed", "modified"}
+        assert all(event["artifact_path"] == "/REPORT.TXT" for event in data["events"])
+        assert all(event["origin"] == "filesystem" for event in data["events"])
+
+        # A source with no filesystem timestamps still appears, anchored to import time.
+        upload(client, case["id"])
+        job2 = store.claim()
+        store.finish(job2, {"artifacts": [{"path": "/notes.txt", "kind": "file"}]})
+        data = client.get(route).json()
+        imported = [event for event in data["events"] if event["origin"] == "import"]
+        assert len(imported) == 1 and imported[0]["timestamp_kind"] == "imported"
+
+        # Bounds are inclusive. Only the 2026 import event survives a 2026 lower bound;
+        # nothing survives an end bound in 1970.
+        window = client.get(route, params={"start": "2026-01-01T00:00:00+00:00"}).json()
+        assert window["total"] == 1 and window["events"][0]["origin"] == "import"
+        assert client.get(route, params={"end": "1970-01-01T00:00:00+00:00"}).json()["total"] == 0
+
+        assert client.get("/api/cases/missing/timeline").status_code == 404

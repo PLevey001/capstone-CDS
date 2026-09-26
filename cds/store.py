@@ -321,6 +321,57 @@ class Store:
             return {"case": dict(case), "selection": "selected_run" if run_id else "latest_saved_results",
                     "items": items, "evidence": evidence}
 
+    def timeline_rows(self, case_id, start=None, end=None):
+        """Chronological filesystem timestamps across a case's latest results.
+
+        Emits one event per non-zero MAC time (accessed, modified, metadata
+        changed, created) on each artifact in each source's result run. Zero
+        means unavailable, so it is skipped. Sources with no filesystem
+        timestamps still appear, anchored to when they were imported.
+        """
+        labels = {"accessed": "Accessed", "modified": "Modified",
+                  "metadata_changed": "Metadata changed", "created": "Created"}
+        with self.connect() as db:
+            db.execute("BEGIN")
+            case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+            if case is None:
+                return None
+            sources = db.execute("""SELECT id,name,kind,imported_at,result_run_id
+                FROM evidence WHERE case_id=? ORDER BY imported_at DESC""", (case_id,)).fetchall()
+            events = []
+            for source in sources:
+                run_id = source["result_run_id"]
+                found = False
+                if run_id:
+                    for row in db.execute("""SELECT id,path,kind,deleted,details FROM artifacts
+                        WHERE evidence_id=? AND run_id=? ORDER BY id""", (source["id"], run_id)):
+                        stamps = json.loads(row["details"]).get("timestamps_unix") or {}
+                        for key, label in labels.items():
+                            unix = stamps.get(key)
+                            if not unix:  # zero or missing means the timestamp is unavailable
+                                continue
+                            try:
+                                when = datetime.fromtimestamp(unix, timezone.utc).isoformat()
+                            except (OverflowError, OSError, ValueError):
+                                continue
+                            found = True
+                            events.append({"at": when, "timestamp_kind": key, "timestamp_label": label,
+                                "origin": "filesystem", "source_id": source["id"], "source_name": source["name"],
+                                "artifact_id": row["id"], "artifact_path": row["path"],
+                                "artifact_kind": row["kind"], "deleted": bool(row["deleted"])})
+                if not found:
+                    # Logical files and un-analyzed sources still belong on the timeline.
+                    events.append({"at": source["imported_at"], "timestamp_kind": "imported",
+                        "timestamp_label": "Imported", "origin": "import", "source_id": source["id"],
+                        "source_name": source["name"], "artifact_id": None,
+                        "artifact_path": source["name"], "artifact_kind": source["kind"], "deleted": False})
+            if start:
+                events = [event for event in events if event["at"] >= start]
+            if end:
+                events = [event for event in events if event["at"] <= end]
+            events.sort(key=lambda event: event["at"])
+            return {"case": dict(case), "total": len(events), "events": events}
+
     def audit(self, case_id):
         with self.connect() as db:
             return [dict(row) for row in db.execute(
