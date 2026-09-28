@@ -7,6 +7,7 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleAlert,
+  Clock,
   Database,
   File,
   FileSearch,
@@ -36,6 +37,7 @@ import {
   type Detail,
   type Evidence,
   type Health,
+  type Timeline,
 } from "./api";
 import Modal from "./components/Modal";
 import AnalysisHistory from "./components/AnalysisHistory";
@@ -49,7 +51,7 @@ import {
   type CoverageFilter,
 } from "./components/Coverage";
 
-type Tab = "evidence" | "activity";
+type Tab = "evidence" | "activity" | "timeline";
 type UploadItem = { name: string; status: string; failed?: boolean };
 
 function Status({ value }: { value: Evidence["status"] }) {
@@ -76,6 +78,7 @@ export default function App() {
   const [caseId, setCaseId] = useState("");
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
+  const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -115,6 +118,7 @@ export default function App() {
     const generation = ++pollGeneration.current;
     setEvidence([]);
     setAudit([]);
+    setTimeline(null);
     setSelected("");
     setCoverageFilter("all");
     if (!caseId) return;
@@ -122,14 +126,16 @@ export default function App() {
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const [items, events, system] = await Promise.all([
+        const [items, events, moments, system] = await Promise.all([
           api<Evidence[]>(`/cases/${caseId}/evidence`),
           api<Audit[]>(`/cases/${caseId}/audit`),
+          api<Timeline>(`/cases/${caseId}/timeline`),
           api<Health>("/health"),
         ]);
         if (!stopped && generation === pollGeneration.current) {
           setEvidence(items);
           setAudit(events);
+          setTimeline(moments);
           setHealth(system);
         }
       } catch (e) {
@@ -387,6 +393,13 @@ export default function App() {
                 <Activity size={16} />
                 Activity log
               </button>
+              <button
+                className={tab === "timeline" ? "active" : ""}
+                onClick={() => setTab("timeline")}
+              >
+                <Clock size={16} />
+                Timeline <span>{timeline?.total ?? 0}</span>
+              </button>
               <span className="panel-note">
                 <ShieldCheck size={13} />
                 Read-only source analysis
@@ -572,7 +585,7 @@ export default function App() {
                   </span>
                 </div>
               </>
-            ) : (
+            ) : tab === "activity" ? (
               <div className="activity-list">
                 {audit.length ? (
                   audit.map((event) => (
@@ -597,6 +610,42 @@ export default function App() {
                 <p className="audit-note">
                   Latest 200 CDS actions. This log is not a complete device
                   history or a tamper-proof chain of custody.
+                </p>
+              </div>
+            ) : (
+              <div className="activity-list">
+                {timeline && timeline.events.length ? (
+                  timeline.events.map((event, index) => (
+                    <div className="activity-row" key={index}>
+                      <span className="activity-icon">
+                        <Clock size={15} />
+                      </span>
+                      <div>
+                        <strong>
+                          {event.timestamp_label}
+                          {event.deleted ? " · deleted" : ""}
+                        </strong>
+                        <p>
+                          {event.artifact_path} · {event.source_name}
+                        </p>
+                      </div>
+                      <time>{date(event.at)}</time>
+                    </div>
+                  ))
+                ) : (
+                  <div className="empty-state">
+                    <Clock size={28} />
+                    <h2>No timestamps yet</h2>
+                    <p>
+                      Analyze a disk image to see file timestamps in
+                      chronological order.
+                    </p>
+                  </div>
+                )}
+                <p className="audit-note">
+                  Ordered by filesystem timestamp (accessed, modified, metadata
+                  changed, created). Zero timestamps are omitted. Filesystem
+                  timestamps do not prove user actions.
                 </p>
               </div>
             )}
@@ -645,6 +694,7 @@ export default function App() {
             setCaseId(remaining[0]?.id || "");
             setEvidence([]);
             setAudit([]);
+            setTimeline(null);
             setSelected("");
             setQuery("");
             setFilter("all");
