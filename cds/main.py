@@ -17,10 +17,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from cds.analysis import ToolLimitError, extract_artifact
 from cds.config import Settings
 from cds.coordinator import Coordinator
 from cds.instance_lock import InstanceLock
 from cds.store import CaseBusyError, Store
+
+
+def safe_filename(name):
+    cleaned = "".join(c for c in name if c.isprintable() and c not in '"\\/')
+    for marker in (" (deleted-realloc)", " (deleted)"):
+        cleaned = cleaned.replace(marker, "")
+    return cleaned.strip()[:200] or "extracted.bin"
 
 
 class CaseNameInput(BaseModel):
@@ -196,6 +204,22 @@ def create_app(settings=None, start_workers=True):
         if item is None:
             raise HTTPException(404, "Artifact not found for this evidence")
         return item
+
+    @app.get("/api/evidence/{evidence_id}/artifacts/{artifact_id}/download")
+    def download_artifact(evidence_id: str, artifact_id: int):
+        """Extract one artifact's bytes; recovers deleted files from disk images."""
+        target = store.extraction_target(evidence_id, artifact_id)
+        if target is None:
+            raise HTTPException(404, "Artifact not found for this evidence")
+        try:
+            data = extract_artifact(target, tool_timeout=settings.tool_timeout)
+        except ToolLimitError as error:
+            raise HTTPException(413, str(error)) from error
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        filename = safe_filename(target["path"].replace("\\", "/").rstrip("/").split("/")[-1])
+        return Response(content=data, media_type="application/octet-stream",
+                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
     @app.get("/api/evidence/{evidence_id}/artifacts")
     def artifacts(evidence_id: str, q: str = Query(default="", max_length=200),

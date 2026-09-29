@@ -24,6 +24,64 @@ class ToolLimitError(ValueError):
         self.reason = reason
 
 
+ADDRESS_RE = re.compile(r"^[0-9]+(-[0-9]+)*$")
+
+
+def _capture(args, timeout, max_bytes):
+    """Run a tool and return its raw stdout bytes, bounded in time and size."""
+    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+        process = subprocess.Popen(args, stdout=output, stderr=errors,
+                                   env={**os.environ, "TZ": "UTC", "LC_ALL": "C"})
+        started = time.monotonic()
+        try:
+            while process.poll() is None:
+                if time.monotonic() - started > timeout:
+                    raise ToolLimitError("tool_timeout", f"{Path(args[0]).name} exceeded the {timeout}s limit")
+                if os.fstat(output.fileno()).st_size > max_bytes:
+                    raise ToolLimitError("tool_output_limit", "Extracted content exceeded the size limit for this prototype")
+                time.sleep(0.05)
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+        if os.fstat(output.fileno()).st_size > max_bytes:
+            raise ToolLimitError("tool_output_limit", "Extracted content exceeded the size limit for this prototype")
+        output.seek(0)
+        errors.seek(0)
+        return process.returncode, output.read(), errors.read(4096).decode("utf-8", errors="replace")
+
+
+def extract_artifact(target, tool_timeout=90, max_bytes=64 * 1024**2):
+    """Return the raw bytes of one artifact's contents.
+
+    For disk-image sources, runs The Sleuth Kit's icat against the recorded
+    metadata address, which recovers deleted files whose contents survive.
+    For logical file sources, returns the imported file's own bytes. Raises
+    ToolLimitError on limits and ValueError on anything not extractable.
+    """
+    if target["kind"] == "directory":
+        raise ValueError("Directories have no file contents to extract.")
+    if target["source_kind"] == "raw_image":
+        if not shutil.which("icat"):
+            raise ValueError("File extraction requires The Sleuth Kit (icat). Install it, then retry.")
+        address = str(target["metadata_address"] or "")
+        if not ADDRESS_RE.match(address):
+            raise ValueError("This artifact has no usable metadata address to extract.")
+        args = ["icat", "-i", "raw", "-b", str(target["sector_size"]),
+                "-o", str(target["partition_offset"] or 0), target["source_path"], address]
+        code, data, error = _capture(args, tool_timeout, max_bytes)
+        if code != 0 and not data:
+            raise ValueError(error.strip()[:300] or "icat could not read this file's contents.")
+        return data
+    # Logical file source: the artifact is the imported file itself.
+    path = Path(target["source_path"])
+    if not path.is_file():
+        raise ValueError("The stored source file is no longer available.")
+    if path.stat().st_size > max_bytes:
+        raise ToolLimitError("tool_output_limit", "File exceeds the extraction size limit for this prototype")
+    return path.read_bytes()
+
+
 def report(work_dir, stage, progress):
     root = Path(work_dir)
     temporary = root / "progress.tmp"
