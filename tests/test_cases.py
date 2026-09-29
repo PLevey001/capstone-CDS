@@ -303,3 +303,26 @@ def test_timeline_orders_filesystem_timestamps_and_falls_back_to_import(tmp_path
         assert client.get(route, params={"end": "1970-01-01T00:00:00+00:00"}).json()["total"] == 0
 
         assert client.get("/api/cases/missing/timeline").status_code == 404
+
+
+def test_download_logical_file_and_rejects_non_files(tmp_path):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    store = app.state.store
+    with TestClient(app) as client:
+        case = create_case(client, "Download case")
+        eid = upload(client, case["id"])
+        job = store.claim()
+        store.finish(job, {"artifacts": [
+            {"path": "/source.txt", "kind": "file"},
+            {"path": "/subdir", "kind": "directory"},
+        ]})
+        listing = client.get(f"/api/evidence/{eid}/artifacts").json()["items"]
+        file_art = next(a for a in listing if a["kind"] == "file")
+        dir_art = next(a for a in listing if a["kind"] == "directory")
+
+        got = client.get(f"/api/evidence/{eid}/artifacts/{file_art['id']}/download")
+        assert got.status_code == 200 and got.content == b"test evidence"
+        assert 'filename="source.txt"' in got.headers["content-disposition"]
+
+        assert client.get(f"/api/evidence/{eid}/artifacts/{dir_art['id']}/download").status_code == 422
+        assert client.get(f"/api/evidence/{eid}/artifacts/999999/download").status_code == 404

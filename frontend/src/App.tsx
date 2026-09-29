@@ -1289,6 +1289,17 @@ function EvidenceDrawer({
                       Partition sector: {a.partition_offset ?? "N/A"} · Metadata
                       address: {a.metadata_address ?? "N/A"}
                     </p>
+                    {a.kind !== "directory" && (
+                      <p>
+                        <a
+                          className="secondary-button"
+                          href={`/api/evidence/${id}/artifacts/${a.id}/download`}
+                        >
+                          <ArrowDownToLine size={14} />
+                          {a.deleted ? "Recover file" : "Download file"}
+                        </a>
+                      </p>
+                    )}
                     <pre>{JSON.stringify(a.details, null, 2)}</pre>
                   </div>
                 )}

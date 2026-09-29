@@ -272,6 +272,20 @@ class Store:
             row = db.execute("SELECT * FROM artifacts WHERE evidence_id=? AND id=?", (evidence_id, artifact_id)).fetchone()
             return self.decode(row) if row else None
 
+    def extraction_target(self, evidence_id, artifact_id):
+        """What is needed to extract one artifact's bytes, from its current run.
+
+        Internal helper for the download endpoint. It returns the on-disk
+        source path, which is never exposed through the normal API responses.
+        """
+        with self.connect() as db:
+            row = db.execute("""SELECT a.path,a.kind,a.deleted,a.metadata_address,a.partition_offset,
+                    e.source_path,e.sector_size,e.kind AS source_kind
+                FROM artifacts a JOIN evidence e ON e.id=a.evidence_id
+                WHERE a.evidence_id=? AND a.id=? AND a.run_id=e.result_run_id""",
+                (evidence_id, artifact_id)).fetchone()
+            return dict(row) if row else None
+
     def export_rows(self, case_id, run_id=None):
         """Export the latest results per source, or one selected historical run."""
         with self.connect() as db:

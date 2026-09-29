@@ -221,3 +221,28 @@ def test_worker_limit_and_actual_parallel_processes(tmp_path, monkeypatch):
     finally:
         (tmp_path / "release").touch()
         coordinator.stop()
+
+
+@pytest.mark.skipif(not shutil.which("fls") or not shutil.which("mmls") or not shutil.which("icat"),
+                    reason="Install The Sleuth Kit for file extraction tests")
+def test_extract_and_recover_files_from_disk_image(tmp_path):
+    from scripts.make_demo import DELETED, NOTE
+    with TestClient(create_app(Settings(tmp_path))) as client:
+        case = client.post("/api/cases", json={"name": "Extraction"}, headers=HEADERS).json()
+        route = f"/api/cases/{case['id']}/evidence"
+        eid = client.post(route, params={"filename": "disk.img", "kind": "raw_image"},
+                          content=partitioned_image(), headers=HEADERS).json()["id"]
+        wait_done(client, case["id"])
+        items = client.get(f"/api/evidence/{eid}/artifacts", params={"limit": "200"}).json()["items"]
+        report = next(a for a in items if a["path"].endswith("REPORT.TXT"))
+        deleted = next(a for a in items if "ECRET" in a["path"])
+
+        live = client.get(f"/api/evidence/{eid}/artifacts/{report['id']}/download")
+        assert live.status_code == 200 and live.content == NOTE
+        assert 'filename="REPORT.TXT"' in live.headers["content-disposition"]
+
+        recovered = client.get(f"/api/evidence/{eid}/artifacts/{deleted['id']}/download")
+        assert recovered.status_code == 200 and recovered.content == DELETED
+        assert "(deleted)" not in recovered.headers["content-disposition"]
+
+        assert client.get(f"/api/evidence/{eid}/artifacts/999999/download").status_code == 404
