@@ -3,6 +3,8 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
+import cds.config as config
+
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat()
@@ -34,7 +36,8 @@ def begin(kind, size, settings, parser, run_id=None):
                       "File contents, unallocated space, and historical activity are not examined."
                       if image else "Source hash and supported file metadata. No event interpretation or forensic conclusions."),
             "limits": {**settings, "text_sample_bytes": 65536, "json_bytes": 4 * 1024**2,
-                       "tool_output_bytes": 16 * 1024**2, "partitions": 128,
+                       "tool_output_bytes": config.TOOL_OUTPUT_BYTES, "tool_stderr_bytes": config.TOOL_STDERR_BYTES,
+                       "partitions": 128,
                        "json_keys": 50, "csv_columns": 100, "metadata_text_chars": 256}, "steps": steps}
 
 

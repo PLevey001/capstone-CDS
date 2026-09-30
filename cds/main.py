@@ -5,8 +5,10 @@ import json
 import os
 import shutil
 import threading
+import urllib.parse
 from collections import Counter
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -29,6 +31,28 @@ def safe_filename(name):
     for marker in (" (deleted-realloc)", " (deleted)"):
         cleaned = cleaned.replace(marker, "")
     return cleaned.strip()[:200] or "extracted.bin"
+
+
+def download_disposition(name):
+    filename = safe_filename(name)
+    fallback = "".join(char if char.isascii() else "_" for char in filename)
+    header = f'attachment; filename="{fallback}"'
+    if filename != fallback:
+        header += "; filename*=UTF-8''" + urllib.parse.quote(filename, safe="")
+    return header
+
+
+def timeline_bound(value, name):
+    if not value:
+        return None
+    try:
+        bound = datetime.fromisoformat(value)
+        if bound.utcoffset() is None:
+            raise ValueError("Missing timezone")
+        return bound.astimezone(timezone.utc)
+    except (ValueError, OverflowError) as error:
+        raise HTTPException(422, f"{name} must be a valid ISO-8601 timestamp with a timezone offset, "
+                                 "for example 2026-01-01T00:00:00Z.") from error
 
 
 class CaseNameInput(BaseModel):
@@ -217,9 +241,9 @@ def create_app(settings=None, start_workers=True):
             raise HTTPException(413, str(error)) from error
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
-        filename = safe_filename(target["path"].replace("\\", "/").rstrip("/").split("/")[-1])
+        filename = target["path"].replace("\\", "/").rstrip("/").split("/")[-1]
         return Response(content=data, media_type="application/octet-stream",
-                        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+                        headers={"Content-Disposition": download_disposition(filename)})
 
     @app.get("/api/evidence/{evidence_id}/artifacts")
     def artifacts(evidence_id: str, q: str = Query(default="", max_length=200),
@@ -250,7 +274,11 @@ def create_app(settings=None, start_workers=True):
         Optional start/end are ISO-8601 UTC bounds (inclusive), e.g. 2026-09-20T00:00:00+00:00.
         """
         require_case(case_id)
-        data = store.timeline_rows(case_id, start or None, end or None)
+        start_time = timeline_bound(start, "start")
+        end_time = timeline_bound(end, "end")
+        if start_time is not None and end_time is not None and start_time > end_time:
+            raise HTTPException(422, "start must be earlier than or equal to end.")
+        data = store.timeline_rows(case_id, start_time, end_time)
         if data is None:
             raise HTTPException(404, "Case not found")
         return data

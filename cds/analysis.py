@@ -7,15 +7,17 @@ import json
 import mimetypes
 import os
 import re
+import selectors
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 
+import cds.artifacts as artifact_rules
+import cds.config as config
 import cds.coverage as coverage_tools
 
-PARSER_VERSION = "cds/0.2.0"
+PARSER_VERSION = "cds/0.2.1"
 
 
 class ToolLimitError(ValueError):
@@ -24,31 +26,44 @@ class ToolLimitError(ValueError):
         self.reason = reason
 
 
-ADDRESS_RE = re.compile(r"^[0-9]+(-[0-9]+)*$")
-
-
 def _capture(args, timeout, max_bytes):
-    """Run a tool and return its raw stdout bytes, bounded in time and size."""
-    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(args, stdout=output, stderr=errors,
-                                   env={**os.environ, "TZ": "UTC", "LC_ALL": "C"})
-        started = time.monotonic()
+    """Bound total output and duration, with a separate 64 KiB stderr ceiling."""
+    output = bytearray()
+    errors = bytearray()
+    stderr_limit = min(max_bytes, config.TOOL_STDERR_BYTES)
+    deadline = time.monotonic() + timeout
+    with subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                          env={**os.environ, "TZ": "UTC", "LC_ALL": "C"}) as process:
         try:
-            while process.poll() is None:
-                if time.monotonic() - started > timeout:
-                    raise ToolLimitError("tool_timeout", f"{Path(args[0]).name} exceeded the {timeout}s limit")
-                if os.fstat(output.fileno()).st_size > max_bytes:
-                    raise ToolLimitError("tool_output_limit", "Extracted content exceeded the size limit for this prototype")
-                time.sleep(0.05)
+            with selectors.DefaultSelector() as streams:
+                streams.register(process.stdout, selectors.EVENT_READ, (output, max_bytes, "stdout"))
+                streams.register(process.stderr, selectors.EVENT_READ, (errors, stderr_limit, "stderr"))
+                # Drain both pipes so a tool writing diagnostics cannot block its output.
+                while streams.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    for key, _ in streams.select(remaining):
+                        buffer, limit, name = key.data
+                        budget = max_bytes - len(output) - len(errors)
+                        chunk = os.read(key.fd, min(65536, limit - len(buffer) + 1, budget + 1))
+                        if not chunk:
+                            streams.unregister(key.fileobj)
+                            continue
+                        if len(buffer) + len(chunk) > limit or len(chunk) > budget:
+                            raise ToolLimitError("tool_output_limit",
+                                                 f"{Path(args[0]).name} {name} exceeded the output budget "
+                                                 f"({max_bytes} bytes total; up to {stderr_limit} bytes of stderr)")
+                        buffer.extend(chunk)
+            # A tool may close its output streams before the process exits.
+            process.wait(timeout=max(0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired as error:
+            raise ToolLimitError("tool_timeout", f"{Path(args[0]).name} exceeded the {timeout}s limit") from error
         finally:
             if process.poll() is None:
                 process.kill()
             process.wait()
-        if os.fstat(output.fileno()).st_size > max_bytes:
-            raise ToolLimitError("tool_output_limit", "Extracted content exceeded the size limit for this prototype")
-        output.seek(0)
-        errors.seek(0)
-        return process.returncode, output.read(), errors.read(4096).decode("utf-8", errors="replace")
+        return process.returncode, bytes(output), errors[:4096].decode("utf-8", errors="replace")
 
 
 def extract_artifact(target, tool_timeout=90, max_bytes=64 * 1024**2):
@@ -59,19 +74,21 @@ def extract_artifact(target, tool_timeout=90, max_bytes=64 * 1024**2):
     For logical file sources, returns the imported file's own bytes. Raises
     ToolLimitError on limits and ValueError on anything not extractable.
     """
-    if target["kind"] == "directory":
-        raise ValueError("Directories have no file contents to extract.")
+    status = artifact_rules.download_status(target, target["source_kind"], target["result_run_id"])
+    if not status["available"]:
+        raise ValueError(status["reason"])
     if target["source_kind"] == "raw_image":
         if not shutil.which("icat"):
             raise ValueError("File extraction requires The Sleuth Kit (icat). Install it, then retry.")
-        address = str(target["metadata_address"] or "")
-        if not ADDRESS_RE.match(address):
-            raise ValueError("This artifact has no usable metadata address to extract.")
-        args = ["icat", "-i", "raw", "-b", str(target["sector_size"]),
-                "-o", str(target["partition_offset"] or 0), target["source_path"], address]
+        args = ["icat"]
+        if target["deleted"]:
+            args.append("-r")
+        args.extend(["-i", "raw", "-b", str(target["sector_size"]),
+                     "-o", str(target["partition_offset"] or 0), target["source_path"], str(target["metadata_address"])])
         code, data, error = _capture(args, tool_timeout, max_bytes)
-        if code != 0 and not data:
-            raise ValueError(error.strip()[:300] or "icat could not read this file's contents.")
+        if code != 0:
+            detail = error.strip()[:300] or "icat could not read this file's contents."
+            raise ValueError(f"Extraction failed; no file was downloaded. {detail}")
         return data
     # Logical file source: the artifact is the imported file itself.
     path = Path(target["source_path"])
@@ -89,27 +106,10 @@ def report(work_dir, stage, progress):
     temporary.replace(root / "progress.json")
 
 
-def run_tool(args, timeout, max_bytes=16 * 1024**2):
-    """Bound command duration and output size; never invoke a shell."""
-    with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
-        process = subprocess.Popen(args, stdout=output, stderr=errors, env={**os.environ, "TZ": "UTC", "LC_ALL": "C"})
-        started = time.monotonic()
-        try:
-            while process.poll() is None:
-                if time.monotonic() - started > timeout:
-                    raise ToolLimitError("tool_timeout", f"{Path(args[0]).name} exceeded the {timeout}s analysis limit")
-                if os.fstat(output.fileno()).st_size + os.fstat(errors.fileno()).st_size > max_bytes:
-                    raise ToolLimitError("tool_output_limit", "Tool output exceeded the analysis limit; use a smaller image for this prototype")
-                time.sleep(0.05)
-        finally:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-        if os.fstat(output.fileno()).st_size + os.fstat(errors.fileno()).st_size > max_bytes:
-            raise ToolLimitError("tool_output_limit", "Tool output exceeded the analysis limit; use a smaller image for this prototype")
-        output.seek(0)
-        errors.seek(0)
-        return process.returncode, output.read().decode("utf-8", errors="replace"), errors.read(4096).decode("utf-8", errors="replace")
+def run_tool(args, timeout, max_bytes=config.TOOL_OUTPUT_BYTES):
+    """Read bounded text output from a tool without invoking a shell."""
+    code, output, error = _capture(args, timeout, max_bytes)
+    return code, output.decode("utf-8", errors="replace"), error
 
 
 def parse_partitions(output, sector_size):

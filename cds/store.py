@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+import cds.artifacts as artifact_rules
 from cds.migrations import migrate_history
 
 logger = logging.getLogger(__name__)
@@ -258,31 +259,44 @@ class Store:
         pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
         with self.connect() as db:
             db.execute("BEGIN")
-            evidence = db.execute("SELECT result_run_id FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+            evidence = db.execute("SELECT kind,result_run_id FROM evidence WHERE id=?", (evidence_id,)).fetchone()
             selected = run_id or (evidence["result_run_id"] if evidence else None)
             where = "evidence_id=? AND run_id=? AND path LIKE ? ESCAPE '\\'"
             params = (evidence_id, selected, pattern)
             count = db.execute(f"SELECT COUNT(*) FROM artifacts WHERE {where}", params).fetchone()[0]
             rows = db.execute(f"SELECT * FROM artifacts WHERE {where} ORDER BY id LIMIT ? OFFSET ?",
                               (*params, limit, offset))
-            return {"run_id": selected, "total": count, "items": [self.decode(row) for row in rows]}
+            items = []
+            for row in rows:
+                item = self.decode(row)
+                item["download"] = artifact_rules.download_status(item, evidence["kind"], evidence["result_run_id"])
+                items.append(item)
+            return {"run_id": selected, "total": count, "items": items}
 
     def artifact(self, evidence_id, artifact_id):
         with self.connect() as db:
-            row = db.execute("SELECT * FROM artifacts WHERE evidence_id=? AND id=?", (evidence_id, artifact_id)).fetchone()
-            return self.decode(row) if row else None
+            row = db.execute("""SELECT a.*,e.kind AS source_kind,e.result_run_id
+                FROM artifacts a JOIN evidence e ON e.id=a.evidence_id
+                WHERE a.evidence_id=? AND a.id=?""", (evidence_id, artifact_id)).fetchone()
+            if row is None:
+                return None
+            item = self.decode(row)
+            source_kind = item.pop("source_kind")
+            current_run_id = item.pop("result_run_id")
+            item["download"] = artifact_rules.download_status(item, source_kind, current_run_id)
+            return item
 
     def extraction_target(self, evidence_id, artifact_id):
-        """What is needed to extract one artifact's bytes, from its current run.
+        """What is needed to check eligibility and extract one artifact's bytes.
 
         Internal helper for the download endpoint. It returns the on-disk
         source path, which is never exposed through the normal API responses.
         """
         with self.connect() as db:
-            row = db.execute("""SELECT a.path,a.kind,a.deleted,a.metadata_address,a.partition_offset,
-                    e.source_path,e.sector_size,e.kind AS source_kind
+            row = db.execute("""SELECT a.path,a.kind,a.deleted,a.metadata_address,a.partition_offset,a.run_id,
+                    e.source_path,e.sector_size,e.kind AS source_kind,e.result_run_id
                 FROM artifacts a JOIN evidence e ON e.id=a.evidence_id
-                WHERE a.evidence_id=? AND a.id=? AND a.run_id=e.result_run_id""",
+                WHERE a.evidence_id=? AND a.id=?""",
                 (evidence_id, artifact_id)).fetchone()
             return dict(row) if row else None
 
@@ -342,6 +356,7 @@ class Store:
         changed, created) on each artifact in each source's result run. Zero
         means unavailable, so it is skipped. Sources with no filesystem
         timestamps still appear, anchored to when they were imported.
+        Bounds, when supplied, are timezone-aware datetimes from the API.
         """
         labels = {"accessed": "Accessed", "modified": "Modified",
                   "metadata_changed": "Metadata changed", "created": "Created"}
@@ -365,8 +380,8 @@ class Store:
                             if not unix:  # zero or missing means the timestamp is unavailable
                                 continue
                             try:
-                                when = datetime.fromtimestamp(unix, timezone.utc).isoformat()
-                            except (OverflowError, OSError, ValueError):
+                                when = datetime.fromtimestamp(unix, timezone.utc)
+                            except (OverflowError, OSError, ValueError, TypeError):
                                 continue
                             found = True
                             events.append({"at": when, "timestamp_kind": key, "timestamp_label": label,
@@ -375,7 +390,11 @@ class Store:
                                 "artifact_kind": row["kind"], "deleted": bool(row["deleted"])})
                 if not found:
                     # Logical files and un-analyzed sources still belong on the timeline.
-                    events.append({"at": source["imported_at"], "timestamp_kind": "imported",
+                    imported = datetime.fromisoformat(source["imported_at"])
+                    if imported.tzinfo is None:
+                        # Older workspaces may have import dates without an offset.
+                        imported = imported.replace(tzinfo=timezone.utc)
+                    events.append({"at": imported, "timestamp_kind": "imported",
                         "timestamp_label": "Imported", "origin": "import", "source_id": source["id"],
                         "source_name": source["name"], "artifact_id": None,
                         "artifact_path": source["name"], "artifact_kind": source["kind"], "deleted": False})
@@ -384,6 +403,8 @@ class Store:
             if end:
                 events = [event for event in events if event["at"] <= end]
             events.sort(key=lambda event: event["at"])
+            for event in events:
+                event["at"] = event["at"].astimezone(timezone.utc).isoformat()
             return {"case": dict(case), "total": len(events), "events": events}
 
     def audit(self, case_id):

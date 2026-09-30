@@ -1289,7 +1289,7 @@ function EvidenceDrawer({
                       Partition sector: {a.partition_offset ?? "N/A"} · Metadata
                       address: {a.metadata_address ?? "N/A"}
                     </p>
-                    {a.kind !== "directory" && (
+                    {a.download.available ? (
                       <p>
                         <a
                           className="secondary-button"
@@ -1299,6 +1299,8 @@ function EvidenceDrawer({
                           {a.deleted ? "Recover file" : "Download file"}
                         </a>
                       </p>
+                    ) : (
+                      <p className="muted">{a.download.reason}</p>
                     )}
                     <pre>{JSON.stringify(a.details, null, 2)}</pre>
                   </div>
