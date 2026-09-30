@@ -32,6 +32,14 @@ def complete(store, limits=None):
     return job, result
 
 
+def assert_artifact_becomes_historical(original, historical):
+    assert original["download"] == {"available": True, "reason": None}
+    assert historical["download"]["available"] is False
+    assert historical["download"]["reason"]
+    # Only the current download eligibility changes; every saved field is intact.
+    assert {**historical, "download": original["download"]} == original
+
+
 @pytest.fixture
 def workspace(tmp_path):
     store = Store(tmp_path)
@@ -50,8 +58,10 @@ def test_successful_runs_keep_distinct_artifacts_and_saved_settings(workspace):
     second, _ = complete(store, {"max_artifacts": 40, "tool_timeout": 15})
     assert first["run_id"] != second["run_id"]
     assert store.detail("source", first["run_id"])["run"] == before
-    assert store.artifacts("source", "", 0, 50, first["run_id"])["items"] == artifacts
-    assert store.artifact("source", artifacts[0]["id"]) == artifacts[0]
+    historical = store.artifacts("source", "", 0, 50, first["run_id"])["items"]
+    for original, saved in zip(artifacts, historical, strict=True):
+        assert_artifact_becomes_historical(original, saved)
+        assert store.artifact("source", original["id"]) == saved
     assert store.artifacts("source", "", 0, 50)["items"][0]["id"] != artifacts[0]["id"]
     assert store.evidence(case["id"])[0]["artifact_count"] == 1
     assert store.evidence(case["id"])[0]["run_count"] == 2
@@ -77,7 +87,11 @@ def test_failed_reanalysis_keeps_previous_results_and_integrity(workspace):
     assert store.detail("source")["sha256"] == snapshot["sha256"]
     assert store.artifacts("source", "", 0, 50)["total"] == 0
     assert store.detail("source", first["run_id"])["run"] == snapshot
-    assert store.artifacts("source", "", 0, 50, first["run_id"]) == previous
+    historical = store.artifacts("source", "", 0, 50, first["run_id"])
+    assert historical["run_id"] == previous["run_id"]
+    assert historical["total"] == previous["total"]
+    for original, saved in zip(previous["items"], historical["items"], strict=True):
+        assert_artifact_becomes_historical(original, saved)
 
 
 def test_interrupted_attempts_and_late_results_cannot_replace_saved_runs(workspace):
@@ -248,8 +262,10 @@ def test_history_api_scoping_and_exports(tmp_path):
         assert [run["id"] for run in runs] == [second["run_id"], first["run_id"]]
         detail = client.get(route, params={"run_id": first["run_id"]}).json()
         assert detail["run_id"] == detail["coverage"]["run_id"] == first["run_id"]
-        assert client.get(route + "/artifacts", params={"run_id": first["run_id"]}).json()["items"] == [original]
-        assert client.get(route + f"/artifacts/{original['id']}").json() == original
+        historical = client.get(route + "/artifacts", params={"run_id": first["run_id"]}).json()["items"]
+        assert len(historical) == 1
+        assert_artifact_becomes_historical(original, historical[0])
+        assert client.get(route + f"/artifacts/{original['id']}").json() == historical[0]
         assert client.get(f"/api/evidence/other/artifacts/{original['id']}").status_code == 404
         for run_id in [other["run_id"], sibling["run_id"], "missing"]:
             assert client.get(route, params={"run_id": run_id}).status_code == 404

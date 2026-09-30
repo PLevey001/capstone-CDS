@@ -3,6 +3,7 @@ import csv
 import hashlib
 import io
 from pathlib import Path
+from urllib.parse import unquote
 
 import httpx
 import pytest
@@ -326,3 +327,143 @@ def test_download_logical_file_and_rejects_non_files(tmp_path):
 
         assert client.get(f"/api/evidence/{eid}/artifacts/{dir_art['id']}/download").status_code == 422
         assert client.get(f"/api/evidence/{eid}/artifacts/999999/download").status_code == 404
+
+
+@pytest.mark.parametrize("name", ["报告.txt", "café notes 📝.txt", 'quotes"and;spaces.txt'])
+def test_download_filename_is_safe_and_preserves_unicode(tmp_path, name):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    with TestClient(app) as client:
+        case = create_case(client)
+        eid = upload(client, case["id"])
+        app.state.store.finish(app.state.store.claim(), {
+            "artifacts": [{"path": "/" + name, "kind": "file"}]})
+        artifact = client.get(f"/api/evidence/{eid}/artifacts").json()["items"][0]
+        response = client.get(f"/api/evidence/{eid}/artifacts/{artifact['id']}/download")
+        assert response.status_code == 200
+        assert response.content == b"test evidence"
+        disposition = response.headers["content-disposition"]
+        assert disposition.isascii()
+        assert '\r' not in disposition and '\n' not in disposition
+        if not name.isascii():
+            assert unquote(disposition.split("filename*=UTF-8''", 1)[1]) == name
+        else:
+            assert 'filename="quotesand;spaces.txt"' in disposition
+
+
+def test_download_eligibility_matches_endpoint_and_changes_after_reanalysis(tmp_path):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    store = app.state.store
+    with TestClient(app) as client:
+        case = create_case(client)
+        eid = upload(client, case["id"])
+        first = store.claim()
+        store.finish(first, {"artifacts": [{"path": "/source.txt", "kind": "file"},
+                                            {"path": "/folder", "kind": "directory"}]})
+        route = f"/api/evidence/{eid}/artifacts"
+        items = client.get(route).json()["items"]
+        file, folder = items
+        assert file["download"] == {"available": True, "reason": None}
+        assert not folder["download"]["available"]
+        response = client.get(f"{route}/{folder['id']}/download")
+        assert response.status_code == 422
+        assert response.json()["detail"] == folder["download"]["reason"]
+        assert client.get(f"{route}/{file['id']}").json() == file
+
+        # While a retry is queued, the last saved result is still current.
+        assert store.retry(eid)
+        assert client.get(f"{route}/{file['id']}").json()["download"]["available"]
+        store.finish(store.claim(), {"artifacts": [{"path": "/source.txt", "kind": "file"}]})
+        historical = client.get(route, params={"run_id": first["run_id"]}).json()["items"][0]
+        assert not historical["download"]["available"]
+        assert "current" in historical["download"]["reason"].lower()
+        assert client.get(f"{route}/{file['id']}").json() == historical
+        response = client.get(f"{route}/{file['id']}/download")
+        assert response.status_code == 422
+        assert response.json()["detail"] == historical["download"]["reason"]
+        other = upload(client, case["id"])
+        assert client.get(f"/api/evidence/{other}/artifacts/{file['id']}/download").status_code == 404
+        assert "source_path" not in historical
+
+
+def test_image_download_requires_a_valid_member_address(tmp_path):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    with TestClient(app) as client:
+        case = create_case(client)
+        eid = client.post(f"/api/cases/{case['id']}/evidence", params={"filename": "disk.img"},
+                          content=b"image fixture", headers=HEADERS).json()["id"]
+        app.state.store.finish(app.state.store.claim(), {"artifacts": [
+            {"path": "disk.img", "kind": "source"},
+            {"path": "/invalid.txt", "kind": "file", "metadata_address": "12\n"},
+            {"path": "/member.txt", "kind": "file", "metadata_address": "12-128-1"},
+        ]})
+        route = f"/api/evidence/{eid}/artifacts"
+        items = client.get(route).json()["items"]
+        for item in items[:2]:
+            assert not item["download"]["available"]
+            response = client.get(f"{route}/{item['id']}/download")
+            assert response.status_code == 422
+            assert response.json()["detail"] == item["download"]["reason"]
+        assert items[2]["download"] == {"available": True, "reason": None}
+
+
+@pytest.fixture
+def timeline_client(tmp_path):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    with TestClient(app) as client:
+        case = create_case(client)
+        upload(client, case["id"])
+        app.state.store.finish(app.state.store.claim(), {"artifacts": [{
+            "path": "/times.txt", "kind": "file", "details": {"timestamps_unix": {
+                "created": -1, "accessed": 1700000000, "modified": 1700000000.5, "metadata_changed": 0}}}]})
+        yield client, f"/api/cases/{case['id']}/timeline"
+
+
+@pytest.mark.parametrize("bound", ["2023-11-14T22:13:20Z", "2023-11-14T22:13:20+00:00",
+                                   "2023-11-14T17:13:20-05:00", "2023-11-15T03:43:20+05:30"])
+def test_timeline_equivalent_inclusive_boundaries(timeline_client, bound):
+    client, route = timeline_client
+    response = client.get(route, params={"start": bound, "end": bound})
+    assert response.status_code == 200
+    assert response.json()["total"] == 1
+    assert response.json()["events"][0]["timestamp_kind"] == "accessed"
+
+
+def test_timeline_fractional_and_pre_epoch_ranges(timeline_client):
+    client, route = timeline_client
+    result = client.get(route, params={"start": "2023-11-14T22:13:20.500000Z"}).json()
+    assert result["total"] == 1
+    assert result["events"][0]["timestamp_kind"] == "modified"
+    result = client.get(route, params={"end": "1969-12-31T23:59:59Z"}).json()
+    assert result["total"] == 1
+    assert result["events"][0]["timestamp_kind"] == "created"
+    # Filtering all file times away must not manufacture an import fallback.
+    assert client.get(route, params={"start": "2024-01-01T00:00:00Z"}).json()["total"] == 0
+
+
+@pytest.mark.parametrize("imported", ["2023-11-15T05:30:00+05:30", "2023-11-15"])
+def test_timeline_normalizes_import_fallback_and_legacy_dates(tmp_path, imported):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    with TestClient(app) as client:
+        case = create_case(client)
+        eid = upload(client, case["id"])
+        with app.state.store.connect() as db:
+            db.execute("UPDATE evidence SET imported_at=? WHERE id=?", (imported, eid))
+        response = client.get(f"/api/cases/{case['id']}/timeline", params={
+            "start": "2023-11-15T00:00:00Z", "end": "2023-11-15T00:00:00Z"})
+        assert response.status_code == 200
+        assert response.json()["total"] == 1
+        event = response.json()["events"][0]
+        assert event["origin"] == "import"
+        assert event["at"] == "2023-11-15T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("bounds", [
+    {"start": "not-a-date"}, {"end": "2023-11-14"}, {"start": "2023-11-14T22:13:20"},
+    {"start": "2023-11-15T00:00:00Z", "end": "2023-11-14T00:00:00Z"},
+    {"end": "9999-12-31T23:59:59-01:00"},
+])
+def test_timeline_rejects_invalid_ranges(timeline_client, bounds):
+    client, route = timeline_client
+    response = client.get(route, params=bounds)
+    assert response.status_code == 422
+    assert isinstance(response.json()["detail"], str)

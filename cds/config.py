@@ -2,6 +2,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+TOOL_OUTPUT_BYTES = 16 * 1024**2
+TOOL_STDERR_BYTES = 64 * 1024
+
 
 @dataclass(frozen=True)
 class Settings:

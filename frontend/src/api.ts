@@ -101,6 +101,7 @@ export type Artifact = {
   deleted: boolean;
   partition_offset: number | null;
   metadata_address: string | null;
+  download: { available: boolean; reason: string | null };
   details: Record<string, unknown>;
 };
 export type Audit = {
