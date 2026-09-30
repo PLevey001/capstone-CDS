@@ -3,10 +3,13 @@ from scripts import run
 
 
 def test_launcher_reuses_healthy_server(tmp_path, monkeypatch, capsys):
+    def unexpected_launch(*args):
+        raise AssertionError("Must not launch a second server")
+
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CDS_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setattr(run, "server_is_healthy", lambda: True)
-    monkeypatch.setattr(run.os, "execv", lambda *args: (_ for _ in ()).throw(AssertionError("Must not launch a second server")))
+    monkeypatch.setattr(run.os, "execv", unexpected_launch)
     lock = InstanceLock(tmp_path / "data")
     lock.acquire()
     try:
