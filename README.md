@@ -90,10 +90,7 @@ The [API reference](http://127.0.0.1:8000/docs) is available while the backend i
 
 ## Next features
 
-- **File extraction and recovery:** export files from disk images and recover deleted files when their contents are still available.
-- **Artifact parsers:** extract browser history, Windows Registry records, and Windows event logs, including from files inside disk images.
-- **Case timeline:** combine timestamps across evidence sources, with date filters and links back to the original artifacts.
-- **Broader image support:** add E01 support and test NTFS and ext filesystems alongside the existing FAT sample images.
+- **LLM integration?:** 
 
 ## Checks before a pull request
 
