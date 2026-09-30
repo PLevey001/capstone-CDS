@@ -42,6 +42,10 @@ def finish(coverage, error=None):
     for item in coverage["steps"]:
         if item["status"] == "running":
             mark(item, "failed", "analysis_error", error or "Analysis ended before this step finished.")
-    coverage["status"] = ("failed" if error else "complete" if all(
-        item["status"] == "complete" for item in coverage["steps"]) else "partial")
+    if error:
+        coverage["status"] = "failed"
+    elif all(item["status"] == "complete" for item in coverage["steps"]):
+        coverage["status"] = "complete"
+    else:
+        coverage["status"] = "partial"
     coverage["finished_at"] = timestamp()

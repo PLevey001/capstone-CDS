@@ -13,7 +13,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from cds.coverage import begin, finish, mark, step
+import cds.coverage as coverage_tools
 
 PARSER_VERSION = "cds/0.2.0"
 
@@ -153,9 +153,9 @@ def parse_bodyfile(output, partition_offset, limit):
 def inspect_image(path, job, result, settings, work_dir):
     coverage = result["coverage"]
     discovery = coverage["steps"][1]
-    mark(discovery, "running", "discovering", "Discovering allocated partitions.")
+    coverage_tools.mark(discovery, "running", "discovering", "Discovering allocated partitions.")
     if not shutil.which("mmls") or not shutil.which("fls"):
-        mark(discovery, "failed", "missing_tool", "Install The Sleuth Kit (mmls and fls), then retry.")
+        coverage_tools.mark(discovery, "failed", "missing_tool", "Install The Sleuth Kit (mmls and fls), then retry.")
         raise ValueError("Raw image analysis requires The Sleuth Kit (mmls and fls). Install it, then retry.")
     _, version, _ = run_tool(["fls", "-V"], settings["tool_timeout"])
     result["metadata"]["sleuthkit_version"] = version.strip()
@@ -169,44 +169,44 @@ def inspect_image(path, job, result, settings, work_dir):
     unparsed = partition_rows - len(partitions) if code == 0 else 0
     if partitions:
         limited = unparsed > 0 or bool(error.strip())
-        mark(discovery, "partial" if limited else "complete",
-             "malformed_partition_records" if unparsed else "tool_warning" if limited else "partition_table_read",
-             (f"{unparsed} partition records could not be parsed; their filesystems were not examined. " if unparsed else "")
-             + (error.strip()[:500] or "Allocated partitions reported by mmls; unallocated space is outside this inventory."),
-             processed=len(partitions), total=None if unparsed else len(partitions))
+        coverage_tools.mark(discovery, "partial" if limited else "complete",
+                            "malformed_partition_records" if unparsed else "tool_warning" if limited else "partition_table_read",
+                            (f"{unparsed} partition records could not be parsed; their filesystems were not examined. " if unparsed else "")
+                            + (error.strip()[:500] or "Allocated partitions reported by mmls; unallocated space is outside this inventory."),
+                            processed=len(partitions), total=None if unparsed else len(partitions))
     else:
-        mark(discovery, "unknown", "partition_layout_unknown",
-             "No partition layout was established. Trying a filesystem at sector 0; this does not establish whole-image coverage.")
+        coverage_tools.mark(discovery, "unknown", "partition_layout_unknown",
+                            "No partition layout was established. Trying a filesystem at sector 0; this does not establish whole-image coverage.")
     offsets = list(dict.fromkeys(p["start_sector"] for p in partitions)) or [0]
     # Create every scope before applying limits so untouched partitions remain visible.
-    inventories = [step(f"filesystem:{offset}", f"Filesystem at sector {offset:,}", "sleuthkit/fls",
-                        partition_offset=offset, sector_size=sector) for offset in offsets]
+    inventories = [coverage_tools.step(f"filesystem:{offset}", f"Filesystem at sector {offset:,}", "sleuthkit/fls",
+                                       partition_offset=offset, sector_size=sector) for offset in offsets]
     coverage["steps"][2:] = inventories
     if len(offsets) > 128:
         for item in inventories:
-            mark(item, "skipped", "partition_limit", "More than 128 partitions; outside prototype limits.")
+            coverage_tools.mark(item, "skipped", "partition_limit", "More than 128 partitions; outside prototype limits.")
         raise ValueError("Image has more than 128 partitions; outside prototype limits")
     readable = 0
     for index, (offset, inventory) in enumerate(zip(offsets, inventories)):
         remaining = settings["max_artifacts"] - len(result["artifacts"])
         if remaining <= 0:
             message = f"Artifact limit ({settings['max_artifacts']}) reached; inventory is incomplete."
-            mark(inventory, "skipped", "artifact_limit", message)
+            coverage_tools.mark(inventory, "skipped", "artifact_limit", message)
             if message not in result["warnings"]:
                 result["warnings"].append(message)
             continue
         report(work_dir, f"Indexing filesystem {index + 1}/{len(offsets)}", 65 + int(25 * index / len(offsets)))
-        mark(inventory, "running", "indexing", "Reading directory entries.")
+        coverage_tools.mark(inventory, "running", "indexing", "Reading directory entries.")
         args = ["fls", "-i", "raw", "-b", str(sector), "-o", str(offset), "-r", "-p", "-m", "/", str(path)]
         try:
             code, listing, error = run_tool(args, settings["tool_timeout"])
         except (ValueError, OSError) as exc:
-            mark(inventory, "failed", getattr(exc, "reason", "tool_error"), str(exc)[:500])
+            coverage_tools.mark(inventory, "failed", getattr(exc, "reason", "tool_error"), str(exc)[:500])
             result["warnings"].append(f"Sector {offset}: {exc}"[:600])
             continue
         if code:
             message = error.strip()[:500] or "Filesystem could not be read; check format, sector size, and encryption."
-            mark(inventory, "failed", "filesystem_unreadable", message)
+            coverage_tools.mark(inventory, "failed", "filesystem_unreadable", message)
             result["warnings"].append(f"Sector {offset}: {message}")
             continue
         readable += 1
@@ -219,11 +219,11 @@ def inspect_image(path, job, result, settings, work_dir):
             reasons.append(f"Artifact limit ({settings['max_artifacts']}) reached; inventory is incomplete")
         if error.strip():
             reasons.append(error.strip()[:500])
-        mark(inventory, "partial" if reasons else "complete",
-             "artifact_limit" if truncated else "malformed_records" if malformed else "tool_warning" if reasons else "listing_read",
-             "; ".join(reasons) if reasons else "Directory entries returned by fls were indexed. File contents were not examined.",
-             processed=len(items), records_returned=sum(bool(line) for line in listing.splitlines()),
-             malformed_records=malformed)
+        coverage_tools.mark(inventory, "partial" if reasons else "complete",
+                            "artifact_limit" if truncated else "malformed_records" if malformed else "tool_warning" if reasons else "listing_read",
+                            "; ".join(reasons) if reasons else "Directory entries returned by fls were indexed. File contents were not examined.",
+                            processed=len(items), records_returned=sum(bool(line) for line in listing.splitlines()),
+                            malformed_records=malformed)
         for reason in reasons:
             result["warnings"].append(f"Sector {offset}: {reason}.")
     if not readable and any(item["status"] == "failed" for item in inventories):
@@ -235,7 +235,7 @@ def inspect_image(path, job, result, settings, work_dir):
 
 def inspect_file(path, name, result):
     content = result["coverage"]["steps"][1]
-    mark(content, "running", "parsing", "Reading file metadata.")
+    coverage_tools.mark(content, "running", "parsing", "Reading file metadata.")
     suffix = Path(name).suffix.lower()
     size = path.stat().st_size
     with path.open("rb") as source:
@@ -245,19 +245,19 @@ def inspect_file(path, name, result):
     meta["mime_note"] = "MIME hint is based on the filename, not verified content type."
     if suffix == ".json":
         if size > 4 * 1024**2:
-            mark(content, "skipped", "json_size_limit", "JSON exceeds the 4 MiB parser limit; source metadata only.")
+            coverage_tools.mark(content, "skipped", "json_size_limit", "JSON exceeds the 4 MiB parser limit; source metadata only.")
             result["warnings"].append("JSON exceeds the 4 MiB parser limit; only source metadata was indexed.")
             return
         with path.open("r", encoding="utf-8-sig") as source:
             data = json.load(source)
-        mark(content, "complete", "json_metadata_read", "JSON parsed for root type and top-level metadata; nested content was not interpreted.", processed=size)
+        coverage_tools.mark(content, "complete", "json_metadata_read", "JSON parsed for root type and top-level metadata; nested content was not interpreted.", processed=size)
         meta.update({"format": "JSON", "root_type": type(data).__name__})
         if isinstance(data, dict):
             meta["top_level_keys"] = [key[:256] for key in list(data)[:50]]
             meta["key_count"] = len(data)
             if len(data) > 50 or any(len(key) > 256 for key in list(data)[:50]):
-                mark(content, "partial", "metadata_limit",
-                     "JSON parsed, but saved key names are limited to 50 keys and 256 characters each. Nested content was not interpreted.")
+                coverage_tools.mark(content, "partial", "metadata_limit",
+                                    "JSON parsed, but saved key names are limited to 50 keys and 256 characters each. Nested content was not interpreted.")
         elif isinstance(data, list):
             meta["item_count"] = len(data)
     elif suffix in {".txt", ".log", ".csv", ".tsv"}:
@@ -268,11 +268,11 @@ def inspect_file(path, name, result):
         except UnicodeDecodeError:
             replaced = True
         limited = size > len(sample)
-        mark(content, "partial" if limited or replaced else "complete",
-             "sample_limit" if limited else "encoding_replaced" if replaced else "text_metadata_read",
-             ("Only the first 64 KiB were sampled. " if limited else "All bytes were read for basic text metadata. ")
-             + ("Invalid or incomplete UTF-8 sequences were replaced. " if replaced else "")
-             + "Line counts and optional column headers only; events were not interpreted.", processed=len(sample))
+        coverage_tools.mark(content, "partial" if limited or replaced else "complete",
+                            "sample_limit" if limited else "encoding_replaced" if replaced else "text_metadata_read",
+                            ("Only the first 64 KiB were sampled. " if limited else "All bytes were read for basic text metadata. ")
+                            + ("Invalid or incomplete UTF-8 sequences were replaced. " if replaced else "")
+                            + "Line counts and optional column headers only; events were not interpreted.", processed=len(sample))
         meta.update({"format": "Delimited text" if suffix in {".csv", ".tsv"} else "Text",
                      "sample_bytes": len(sample), "sample_truncated": size > len(sample),
                      "sample_line_count": len(text.splitlines()), "encoding": "UTF-8 (replacement on invalid bytes)"})
@@ -281,10 +281,10 @@ def inspect_file(path, name, result):
             columns = next(reader, [])
             meta["columns"] = [value[:256] for value in columns[:100]]
             if len(columns) > 100 or any(len(value) > 256 for value in columns[:100]):
-                mark(content, "partial", content["reason"] if limited or replaced else "metadata_limit",
-                     content["detail"] + " Saved headers are limited to 100 columns and 256 characters each.")
+                coverage_tools.mark(content, "partial", content["reason"] if limited or replaced else "metadata_limit",
+                                    content["detail"] + " Saved headers are limited to 100 columns and 256 characters each.")
     else:
-        mark(content, "unsupported", "no_content_parser", "No content parser for this file type; source hash and metadata only.")
+        coverage_tools.mark(content, "unsupported", "no_content_parser", "No content parser for this file type; source hash and metadata only.")
         meta["format"] = "Generic file"
         result["warnings"].append("No content parser for this file type; SHA-256 and source metadata only.")
 
@@ -293,14 +293,14 @@ def analyze(job, settings, work_dir):
     """One job per process. Always return serializable results, including failures."""
     result = {"sha256": job.get("sha256"), "metadata": {"parser_version": PARSER_VERSION},
               "artifacts": [], "partitions": [], "warnings": []}
-    coverage = result["coverage"] = begin(job["kind"], job["size"], settings, PARSER_VERSION, job.get("run_id"))
+    coverage = result["coverage"] = coverage_tools.begin(job["kind"], job["size"], settings, PARSER_VERSION, job.get("run_id"))
     integrity = coverage["steps"][0]
-    mark(integrity, "running", "hashing", "Reading source bytes for SHA-256.")
+    coverage_tools.mark(integrity, "running", "hashing", "Reading source bytes for SHA-256.")
     try:
         path = Path(job["source_path"])
         size = path.stat().st_size
         if size != job["size"]:
-            mark(integrity, "failed", "source_size_changed", "Stored evidence size changed since import.")
+            coverage_tools.mark(integrity, "failed", "source_size_changed", "Stored evidence size changed since import.")
             raise ValueError("Stored evidence size changed since import")
         digest = hashlib.sha256()
         consumed = 0
@@ -315,12 +315,12 @@ def analyze(job, settings, work_dir):
                     last_report = time.monotonic()
         observed_hash = digest.hexdigest()
         if job.get("sha256") and observed_hash != job["sha256"]:
-            mark(integrity, "failed", "source_hash_changed", "Source hash differs from the previous analysis; original hash retained.")
+            coverage_tools.mark(integrity, "failed", "source_hash_changed", "Source hash differs from the previous analysis; original hash retained.")
             result["metadata"]["observed_sha256"] = observed_hash
             raise ValueError("Stored evidence hash changed since the previous analysis. The original recorded hash has been retained.")
         result["sha256"] = observed_hash
-        mark(integrity, "complete", "hash_verified" if job.get("sha256") else "hash_recorded",
-             "All source bytes hashed." + (" Matches the previous analysis." if job.get("sha256") else " This is the initial recorded hash."), processed=consumed)
+        coverage_tools.mark(integrity, "complete", "hash_verified" if job.get("sha256") else "hash_recorded",
+                            "All source bytes hashed." + (" Matches the previous analysis." if job.get("sha256") else " This is the initial recorded hash."), processed=consumed)
         result["metadata"].update({"size_bytes": size, "imported_at": job["imported_at"],
                                     "timestamp_note": "Import time is a CDS action, not the original file creation time."})
         result["artifacts"].append({"path": job["name"], "kind": "source", "size": size,
@@ -335,6 +335,6 @@ def analyze(job, settings, work_dir):
         result["error"] = f"{type(error).__name__}: {error}"[:2000]
         for item in coverage["steps"]:
             if item["status"] == "running":
-                mark(item, "failed", getattr(error, "reason", "parser_error"), result["error"])
-    finish(coverage, result.get("error"))
+                coverage_tools.mark(item, "failed", getattr(error, "reason", "parser_error"), result["error"])
+    coverage_tools.finish(coverage, result.get("error"))
     return result
