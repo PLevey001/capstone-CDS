@@ -5,6 +5,8 @@ __pycache__/
 node_modules/
 frontend/dist/
 frontend/*.tsbuildinfo
+frontend/test-results/
+frontend/playwright-report/
 data/
 demo-evidence/
 *.egg-info/

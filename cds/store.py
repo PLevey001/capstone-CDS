@@ -1,3 +1,4 @@
+import hashlib
 import json
 import logging
 import shutil
@@ -349,7 +350,7 @@ class Store:
             return {"case": dict(case), "selection": "selected_run" if run_id else "latest_saved_results",
                     "items": items, "evidence": evidence}
 
-    def timeline_rows(self, case_id, start=None, end=None):
+    def timeline_rows(self, case_id, start=None, end=None, offset=0, limit=100, revision=None):
         """Chronological filesystem timestamps across a case's latest results.
 
         Emits one event per non-zero MAC time (accessed, modified, metadata
@@ -366,7 +367,11 @@ class Store:
             if case is None:
                 return None
             sources = db.execute("""SELECT id,name,kind,imported_at,result_run_id
-                FROM evidence WHERE case_id=? ORDER BY imported_at DESC""", (case_id,)).fetchall()
+                FROM evidence WHERE case_id=? ORDER BY id""", (case_id,)).fetchall()
+            snapshot = [(source["id"], source["result_run_id"], source["imported_at"]) for source in sources]
+            current_revision = hashlib.sha256(json.dumps(snapshot).encode()).hexdigest()
+            if revision and revision != current_revision:
+                offset = 0
             events = []
             for source in sources:
                 run_id = source["result_run_id"]
@@ -384,7 +389,8 @@ class Store:
                             except (OverflowError, OSError, ValueError, TypeError):
                                 continue
                             found = True
-                            events.append({"at": when, "timestamp_kind": key, "timestamp_label": label,
+                            events.append({"id": f"{source['id']}:{run_id}:{row['id']}:{key}", "run_id": run_id,
+                                "at": when, "timestamp_kind": key, "timestamp_label": label,
                                 "origin": "filesystem", "source_id": source["id"], "source_name": source["name"],
                                 "artifact_id": row["id"], "artifact_path": row["path"],
                                 "artifact_kind": row["kind"], "deleted": bool(row["deleted"])})
@@ -394,7 +400,8 @@ class Store:
                     if imported.tzinfo is None:
                         # Older workspaces may have import dates without an offset.
                         imported = imported.replace(tzinfo=timezone.utc)
-                    events.append({"at": imported, "timestamp_kind": "imported",
+                    events.append({"id": f"{source['id']}:{run_id or 'pending'}:imported", "run_id": run_id,
+                        "at": imported, "timestamp_kind": "imported",
                         "timestamp_label": "Imported", "origin": "import", "source_id": source["id"],
                         "source_name": source["name"], "artifact_id": None,
                         "artifact_path": source["name"], "artifact_kind": source["kind"], "deleted": False})
@@ -402,10 +409,13 @@ class Store:
                 events = [event for event in events if event["at"] >= start]
             if end:
                 events = [event for event in events if event["at"] <= end]
-            events.sort(key=lambda event: event["at"])
+            events.sort(key=lambda event: (event["at"], event["id"]))
+            total = len(events)
+            events = events[offset:offset + limit]
             for event in events:
                 event["at"] = event["at"].astimezone(timezone.utc).isoformat()
-            return {"case": dict(case), "total": len(events), "events": events}
+            return {"case": dict(case), "revision": current_revision, "offset": offset, "limit": limit,
+                    "total": total, "events": events}
 
     def audit(self, case_id):
         with self.connect() as db:

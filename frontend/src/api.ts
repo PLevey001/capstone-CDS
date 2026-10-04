@@ -112,6 +112,8 @@ export type Audit = {
   evidence_id: string | null;
 };
 export type TimelineEvent = {
+  id: string;
+  run_id: string | null;
   at: string;
   timestamp_kind: string;
   timestamp_label: string;
@@ -125,6 +127,9 @@ export type TimelineEvent = {
 };
 export type Timeline = {
   case: Case;
+  revision: string;
+  offset: number;
+  limit: number;
   total: number;
   events: TimelineEvent[];
 };
