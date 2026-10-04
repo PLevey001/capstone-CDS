@@ -871,8 +871,9 @@ function UploadModal({
         multiple files to queue them together.
       </p>
       <p className="modal-description">
-        Chrome history: add a standalone History database snapshot. Separate
-        browser journals are not examined in this version.
+        Browser history: add a standalone Chrome History or Firefox
+        places.sqlite database snapshot. Separate browser journals are not
+        examined in this version.
       </p>
       <input
         ref={input}

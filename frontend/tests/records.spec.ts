@@ -1,24 +1,35 @@
-import { expect, test, chromium, type Page } from "@playwright/test";
+import { expect, test, chromium, firefox, type Page } from "@playwright/test";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const headers = { "X-CDS-Request": "local-ui" };
 
-async function importHistory(page: Page, buffer?: Buffer) {
-  const name = `Chrome ${Date.now()}`;
+async function importHistory(
+  page: Page,
+  buffer?: Buffer,
+  filename = "History",
+) {
+  const name = `${filename} ${Date.now()}`;
   const created = await page.request.post("/api/cases", {
     headers,
     data: { name },
   });
   const caseId = (await created.json()).id;
   const bytes =
-    buffer ?? (await (await page.request.get("/test/chrome-file")).body());
+    buffer ??
+    (await (
+      await page.request.get(
+        filename === "places.sqlite"
+          ? "/test/firefox-file"
+          : "/test/chrome-file",
+      )
+    ).body());
   await page.goto("/");
   await page.getByRole("button", { name, exact: true }).click();
   await page.getByRole("button", { name: "Add evidence", exact: true }).click();
   await page.locator("input[type=file]").setInputFiles({
-    name: "History",
+    name: filename,
     mimeType: "application/octet-stream",
     buffer: bytes,
   });
@@ -32,7 +43,11 @@ async function importHistory(page: Page, buffer?: Buffer) {
   const source = (
     await (await page.request.get(`/api/cases/${caseId}/evidence`)).json()
   )[0].id;
-  await page.getByRole("button", { name: /^History Logical file/ }).click();
+  await page
+    .getByRole("button", {
+      name: new RegExp(`^${filename.replaceAll(".", "\\.")} Logical file`),
+    })
+    .click();
   await expect(page.getByText("Viewing run 1", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /^Records \d/ }).click();
   return { caseId, source, run };
@@ -148,53 +163,78 @@ test("an earlier run without parsed records remains understandable", async ({
   await expect(page.getByText("Viewing run 1", { exact: true })).toBeVisible();
 });
 
-test("a fresh Chromium profile supplies independently recorded visits", async ({
-  page,
-}) => {
-  const profile = await mkdtemp(join(tmpdir(), "cds-chromium-fixture-"));
-  try {
-    const context = await chromium.launchPersistentContext(profile, {
-      channel: "chromium",
-      headless: true,
-    });
-    const started = Date.now();
-    try {
-      const tab = await context.newPage();
-      await tab.goto("http://127.0.0.1:8765/test/visited/first");
-      await tab.goto("http://127.0.0.1:8765/test/visited/second");
-      await tab.goto("http://127.0.0.1:8765/test/visited/first");
-    } finally {
-      await context.close();
-    }
-    const finished = Date.now();
-    const fixture = await importHistory(
-      page,
-      await readFile(join(profile, "Default", "History")),
+for (const browserType of [chromium, firefox]) {
+  test(`a fresh ${browserType.name()} profile supplies independently recorded visits`, async ({
+    page,
+  }, testInfo) => {
+    const isFirefox = browserType === firefox;
+    const filename = isFirefox ? "places.sqlite" : "History";
+    const profile = await mkdtemp(
+      join(tmpdir(), `cds-${browserType.name()}-fixture-`),
     );
-    const data = await (
-      await page.request.get(`/api/evidence/${fixture.source}/records`)
-    ).json();
-    expect(data.items).toHaveLength(3);
-    expect(
-      data.items.map((r: { details: { url: string } }) => r.details.url),
-    ).toEqual([
-      "http://127.0.0.1:8765/test/visited/first",
-      "http://127.0.0.1:8765/test/visited/second",
-      "http://127.0.0.1:8765/test/visited/first",
-    ]);
-    for (const record of data.items) {
-      expect(Date.parse(record.at)).toBeGreaterThanOrEqual(started);
-      expect(Date.parse(record.at)).toBeLessThanOrEqual(finished);
+    try {
+      const context = await browserType.launchPersistentContext(
+        profile,
+        isFirefox
+          ? {
+              headless: true,
+              firefoxUserPrefs: {
+                "places.history.enabled": true,
+                "browser.privatebrowsing.autostart": false,
+              },
+            }
+          : { channel: "chromium", headless: true },
+      );
+      testInfo.annotations.push({
+        type: "fixture-browser",
+        description: context.browser()?.version() ?? browserType.name(),
+      });
+      const started = Date.now();
+      try {
+        const tab = await context.newPage();
+        await tab.goto("http://127.0.0.1:8765/test/visited/first");
+        await tab.goto("http://127.0.0.1:8765/test/visited/second");
+        await tab.goto("http://127.0.0.1:8765/test/visited/first");
+      } finally {
+        await context.close();
+      }
+      const finished = Date.now();
+      const path = isFirefox
+        ? join(profile, filename)
+        : join(profile, "Default", filename);
+      const fixture = await importHistory(page, await readFile(path), filename);
+      const data = await (
+        await page.request.get(`/api/evidence/${fixture.source}/records`)
+      ).json();
+      expect(data.items).toHaveLength(3);
+      expect(
+        data.items.map(
+          (record: { details: { url: string } }) => record.details.url,
+        ),
+      ).toEqual([
+        "http://127.0.0.1:8765/test/visited/first",
+        "http://127.0.0.1:8765/test/visited/second",
+        "http://127.0.0.1:8765/test/visited/first",
+      ]);
+      for (const record of data.items) {
+        expect(Date.parse(record.at)).toBeGreaterThanOrEqual(started);
+        expect(Date.parse(record.at)).toBeLessThanOrEqual(finished);
+      }
+      await expect(page.getByText("1–3 of 3 records")).toBeVisible();
+      await page.locator(".record-row").first().click();
+      const selected = page.getByRole("region", {
+        name: "Selected record",
+        exact: true,
+      });
+      await expect(selected).toContainText("Browser calibration page");
+      await expect(selected).toContainText(
+        isFirefox ? "Firefox" : "Chrome/Chromium",
+      );
+    } finally {
+      await rm(profile, { recursive: true, force: true });
     }
-    await expect(page.getByText("1–3 of 3 records")).toBeVisible();
-    await page.locator(".record-row").first().click();
-    await expect(
-      page.getByRole("region", { name: "Selected record", exact: true }),
-    ).toContainText("Browser calibration page");
-  } finally {
-    await rm(profile, { recursive: true, force: true });
-  }
-});
+  });
+}
 
 test("record failures can be retried and delayed searches cannot replace newer results", async ({
   page,
@@ -242,4 +282,60 @@ test("record failures can be retried and delayed searches cannot replace newer r
   await page.unrouteAll({ behavior: "wait" });
   await expect(page.locator(".record-row")).toHaveCount(1);
   await expect(page.locator(".record-row")).toContainText("=2+2");
+});
+
+test("Firefox uses the same paging, export, and mixed-browser timeline navigation", async ({
+  page,
+}) => {
+  const fixture = await importHistory(page, undefined, "places.sqlite");
+  await expect(page.getByText("1–50 of 120 records")).toBeVisible();
+  await page.getByRole("button", { name: "Next record page" }).click();
+  await expect(page.getByText("51–100 of 120 records")).toBeVisible();
+  await page.locator(".record-row").first().click();
+  const selected = page.getByRole("region", {
+    name: "Selected record",
+    exact: true,
+  });
+  await expect(selected).toContainText("Firefox");
+  await expect(selected).toContainText("2023-11-14 23:03:20.123456 UTC");
+  await page.getByLabel("Search records").fill("%_");
+  await expect(page.getByText("1–1 of 1 records")).toBeVisible();
+  const jsonLink = page.getByRole("link", {
+    name: "Export matching records JSON",
+  });
+  const exported = await (
+    await page.request.get((await jsonLink.getAttribute("href"))!)
+  ).json();
+  expect(exported.items).toHaveLength(1);
+  expect(exported.items[0].details.browser).toBe("Firefox");
+  expect(exported.items[0].details.visit_type).toBe(1);
+  const chromeFile = await (await page.request.get("/test/chrome-file")).body();
+  expect(
+    (
+      await page.request.post(
+        `/api/cases/${fixture.caseId}/evidence?filename=History`,
+        { headers, data: chromeFile },
+      )
+    ).ok(),
+  ).toBeTruthy();
+  expect(
+    (await page.request.post("/test/process", { headers })).ok(),
+  ).toBeTruthy();
+  await page.getByRole("button", { name: "Close evidence details" }).click();
+  await page.getByRole("button", { name: "Timeline", exact: true }).click();
+  await expect(page.getByText("1–100 of 240 timestamps")).toBeVisible();
+  await page
+    .locator(".timeline-event")
+    .filter({ hasText: "places.sqlite" })
+    .first()
+    .click();
+  await expect(selected).toContainText("Firefox");
+  await expect(selected).toContainText(fixture.run);
+  await page
+    .getByRole("button", { name: "Open source artifact: places.sqlite" })
+    .click();
+  await expect(page.locator(".timeline-artifact")).toContainText(
+    "places.sqlite",
+  );
+  await expect(page.locator(".timeline-artifact")).toContainText(fixture.run);
 });

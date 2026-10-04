@@ -18,9 +18,9 @@ from pathlib import Path
 import cds.artifacts as artifact_rules
 import cds.config as config
 import cds.coverage as coverage_tools
-from cds.chrome_history import PARSER as CHROME_PARSER, SNAPSHOT_SCOPE
+from cds.history_records import SNAPSHOT_SCOPE
 
-PARSER_VERSION = "cds/0.3.0"
+PARSER_VERSION = "cds/0.4.0"
 
 
 class ToolLimitError(ValueError):
@@ -241,8 +241,8 @@ def inspect_history(path, result, settings, work_dir):
     coverage = result["coverage"]
     limits = config.CONTENT_LIMITS
     coverage["limits"].update(limits)
-    coverage["scope"] = "Source hash, file metadata, and supported Chrome/Chromium visits. " + SNAPSHOT_SCOPE
-    history = coverage_tools.step("chrome-history", "Chrome/Chromium history", CHROME_PARSER)
+    coverage["scope"] = "Source hash, file metadata, and supported browser visits. " + SNAPSHOT_SCOPE
+    history = coverage_tools.step("browser-history", "Browser history", "browser-history/1")
     coverage["steps"].append(history)
     coverage_tools.mark(history, "running", "parsing", "Reading a disposable database copy.")
     result["warnings"].append(SNAPSHOT_SCOPE)
@@ -266,15 +266,16 @@ def inspect_history(path, result, settings, work_dir):
                 raise ValueError("Source changed between hashing and the browser parser copy; no visits were saved.")
             timeout = min(settings["tool_timeout"], limits["content_timeout"])
             report(work_dir, "Reading browser visits", 75)
-            args = [sys.executable, "-m", "cds.content_parser", "chrome-history", str(copy), json.dumps(limits)]
+            args = [sys.executable, "-m", "cds.content_parser", "browser-history", str(copy), json.dumps(limits)]
             code, output, error = _capture(args, timeout, limits["record_payload_bytes"] + config.TOOL_STDERR_BYTES)
         if code:
             raise ValueError(error.strip()[:500] or "The browser parser exited without usable results.")
         parsed = json.loads(output)
         result["records"] = parsed.pop("records")
+        history.update({key: parsed[key] for key in ("id", "label", "parser")})
         coverage_tools.mark(history, parsed["status"], parsed["reason"], parsed["detail"],
                             processed=parsed["processed"], total=parsed["total"])
-        result["metadata"]["format"] = ("Chrome/Chromium history" if parsed["status"] in {"complete", "partial"}
+        result["metadata"]["format"] = (parsed["label"] if parsed["status"] in {"complete", "partial"}
                                         else "SQLite candidate")
         if parsed["status"] != "complete":
             result["warnings"].append(parsed["detail"])
