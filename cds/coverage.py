@@ -20,6 +20,10 @@ def mark(item, status, reason, detail, **counts):
     item.update(status=status, reason=reason, detail=detail, **counts)
 
 
+def find(coverage, identifier):
+    return next(item for item in coverage["steps"] if item["id"] == identifier)
+
+
 def begin(kind, size, settings, parser, run_id=None):
     image = kind == "raw_image"
     steps = [step("hash", "Source integrity · SHA-256", parser, total=size, unit="bytes")]

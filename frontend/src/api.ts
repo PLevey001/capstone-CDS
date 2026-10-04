@@ -44,13 +44,18 @@ export type AnalysisRun = {
   error: string | null;
   legacy: boolean;
   artifact_count: number;
+  record_count: number;
   coverage_status: Coverage["status"];
   parser_version: string | null;
   tool_version: string | null;
 };
 export type RunSnapshot = Omit<
   AnalysisRun,
-  "artifact_count" | "coverage_status" | "parser_version" | "tool_version"
+  | "artifact_count"
+  | "record_count"
+  | "coverage_status"
+  | "parser_version"
+  | "tool_version"
 > & {
   metadata: Record<string, unknown>;
   coverage: Coverage | null;
@@ -75,6 +80,7 @@ export type Evidence = {
   warnings: string[];
   error: string | null;
   artifact_count: number;
+  record_count: number;
   metadata: Record<string, unknown>;
   started_at: string | null;
   finished_at: string | null;
@@ -111,13 +117,28 @@ export type Audit = {
   at: string;
   evidence_id: string | null;
 };
+export type ParsedRecord = {
+  id: number;
+  evidence_id: string;
+  run_id: string;
+  artifact_id: number;
+  artifact_path: string;
+  kind: string;
+  source_key: string;
+  at: string | null;
+  summary: string;
+  parser: string;
+  details: Record<string, unknown>;
+};
 export type TimelineEvent = {
   id: string;
   run_id: string | null;
   at: string;
   timestamp_kind: string;
   timestamp_label: string;
-  origin: "filesystem" | "import";
+  origin: "filesystem" | "import" | "record";
+  record_id: number | null;
+  summary?: string;
   source_id: string;
   source_name: string;
   artifact_id: number | null;
@@ -169,4 +190,8 @@ export function bytes(size: number): string {
 }
 export function date(value: string) {
   return new Date(value).toLocaleString();
+}
+
+export function utcDate(value: string) {
+  return value.replace("T", " ").replace(/Z$|\+00:00$/, " UTC");
 }

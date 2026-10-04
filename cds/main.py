@@ -55,6 +55,14 @@ def timeline_bound(value, name):
                                  "for example 2026-01-01T00:00:00Z.") from error
 
 
+def csv_record_value(value):
+    # Keep saved text exact in JSON; spreadsheet exports escape formula-like cells.
+    if isinstance(value, str) and (value.lstrip(" \t\r\n\ufeff").startswith(("=", "+", "-", "@"))
+                                   or value.startswith(("\t", "\r", "\n"))):
+        return "'" + value
+    return value
+
+
 class CaseNameInput(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
@@ -261,6 +269,52 @@ def create_app(settings=None, start_workers=True):
             raise HTTPException(409, "Wait for the current analysis to finish before analyzing again")
         return {"status": "queued"}
 
+    @app.get("/api/evidence/{evidence_id}/records")
+    def records(evidence_id: str, q: str = Query(default="", max_length=200),
+                offset: int = Query(default=0, ge=0), limit: int = Query(default=50, ge=1, le=200),
+                run_id: str | None = Query(default=None, min_length=1, max_length=64)):
+        if store.detail(evidence_id, run_id) is None:
+            raise HTTPException(404, "Evidence or saved run not found")
+        return store.records(evidence_id, q, offset, limit, run_id)
+
+    @app.get("/api/evidence/{evidence_id}/records/{record_id}")
+    def record(evidence_id: str, record_id: int):
+        item = store.record(evidence_id, record_id)
+        if item is None:
+            raise HTTPException(404, "Record not found for this evidence")
+        return item
+
+    @app.get("/api/cases/{case_id}/records/export")
+    def export_records(case_id: str, format: str = Query(default="json", pattern="^(csv|json)$"),
+                       run_id: str | None = Query(default=None, min_length=1, max_length=64),
+                       q: str = Query(default="", max_length=200)):
+        """Export every matching saved record, independent of the visible page.
+
+        CSV prefixes formula-like text cells with an apostrophe; JSON preserves saved values.
+        Parser truncation and scope are retained in record details and saved coverage.
+        """
+        data = store.export_records(case_id, run_id, q)
+        if data is None:
+            raise HTTPException(404, "Case or saved run not found")
+        stem = f"cds-records-{case_id[:8]}" + (f"-run-{run_id}" if run_id else "")
+        if format == "json":
+            return Response(json.dumps(data, indent=2), media_type="application/json",
+                            headers={"Content-Disposition": f'attachment; filename="{stem}.json"'})
+        columns = ["id", "evidence_id", "run_id", "run_number", "artifact_id", "source_name", "source_sha256",
+                   "artifact_path", "kind", "source_key", "at", "event_time_us", "summary", "parser",
+                   "browser", "url", "title", "coverage_status", "coverage", "details"]
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        coverage = {source["run_id"]: source["coverage"] for source in data["evidence"]}
+        for item in data["items"]:
+            row = {**item, **{key: item["details"].get(key) for key in ("browser", "url", "title")},
+                   "coverage": json.dumps(coverage[item["run_id"]], ensure_ascii=True),
+                   "details": json.dumps(item["details"], ensure_ascii=True)}
+            writer.writerow({key: csv_record_value(value) for key, value in row.items()})
+        return Response(buffer.getvalue(), media_type="text/csv",
+                        headers={"Content-Disposition": f'attachment; filename="{stem}.csv"'})
+
     @app.get("/api/cases/{case_id}/audit")
     def audit(case_id: str):
         require_case(case_id)
@@ -271,7 +325,7 @@ def create_app(settings=None, start_workers=True):
                  end: str = Query(default="", max_length=40),
                  offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=200),
                  revision: str = Query(default="", max_length=64)):
-        """Filesystem timestamps across a case's latest results, in time order.
+        """Filesystem timestamps and parsed-record times from a case's latest results.
 
         Optional start/end are ISO-8601 UTC bounds (inclusive), e.g. 2026-09-20T00:00:00+00:00.
         Supply the previous page's revision to reset pagination if saved results change.

@@ -1,12 +1,8 @@
 import { useEffect, useState } from "react";
 import { ChevronLeft, ChevronRight, Clock } from "lucide-react";
-import { api, type Timeline, type TimelineEvent } from "../api";
+import { api, utcDate, type Timeline, type TimelineEvent } from "../api";
 
 const PAGE_SIZE = 100;
-
-function utcDate(value: string) {
-  return value.replace("T", " ").replace(/Z$|\+00:00$/, " UTC");
-}
 
 export default function TimelinePanel({
   caseId,
@@ -192,13 +188,18 @@ export default function TimelinePanel({
                           {event.timestamp_label}
                           {event.deleted ? " · deleted" : ""}
                         </strong>
+                        {event.summary && (
+                          <span className="timeline-path">{event.summary}</span>
+                        )}
                         <span className="timeline-path">
                           {event.artifact_path} · {event.source_name}
                         </span>
                         <small>
                           {event.origin === "import"
                             ? "Imported into CDS · open source"
-                            : "Filesystem timestamp · open artifact"}
+                            : event.origin === "record"
+                              ? "Parsed browser record · open visit"
+                              : "Filesystem timestamp · open artifact"}
                         </small>
                       </span>
                       <time dateTime={event.at}>{utcDate(event.at)}</time>
@@ -219,8 +220,9 @@ export default function TimelinePanel({
       <p className="audit-note">
         Filesystem timestamps describe accessed, modified, metadata changed, or
         created times; they do not prove user actions. Zero timestamps are
-        omitted. Sources without file timestamps show when they were imported
-        into CDS.
+        omitted. Browser visits are labeled separately and may include synced or
+        imported activity. Sources without usable file or record times show when
+        they were imported into CDS.
       </p>
     </div>
   );
