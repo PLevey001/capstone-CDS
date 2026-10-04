@@ -11,19 +11,20 @@ from cds.config import Settings
 from cds.main import create_app, csv_record_value
 from cds.migrations import migrate_records
 from cds.store import Store
-from scripts.make_browser_demo import make_chrome_history
+from scripts.make_browser_demo import make_chrome_history, make_firefox_history
 
 HEADERS = {"X-CDS-Request": "local-ui"}
 LIMITS = {"max_artifacts": 20, "tool_timeout": 5}
 
 
-@pytest.fixture
-def records(tmp_path):
+@pytest.fixture(params=[("History", make_chrome_history), ("places.sqlite", make_firefox_history)], ids=["chrome", "firefox"])
+def records(tmp_path, request):
     app = create_app(Settings(tmp_path / "workspace"), start_workers=False)
     with TestClient(app) as client:
         case = client.post("/api/cases", json={"name": "Browser records"}, headers=HEADERS).json()["id"]
-        path = make_chrome_history(tmp_path / "History", count=120)
-        source = client.post(f"/api/cases/{case}/evidence", params={"filename": "History"},
+        name, make_history = request.param
+        path = make_history(tmp_path / name, count=120)
+        source = client.post(f"/api/cases/{case}/evidence", params={"filename": name},
                              content=path.read_bytes(), headers=HEADERS).json()["id"]
         store = app.state.store
         job = store.claim()
@@ -227,3 +228,41 @@ def test_empty_record_export_retains_run_coverage(records):
     assert data['evidence'][0]['run_id'] == job['run_id']
     assert data['evidence'][0]['coverage']['scope'] == result['coverage']['scope']
     assert data['evidence'][0]['coverage']['limits']['parsed_records'] == 10000
+
+
+def test_mixed_browser_timeline_and_exports_use_one_utc_scale(tmp_path):
+    app = create_app(Settings(tmp_path / "workspace"), start_workers=False)
+    with TestClient(app) as client:
+        case = client.post("/api/cases", json={"name": "Mixed browsers"}, headers=HEADERS).json()["id"]
+        originals = {}
+        for name, make_history in (("History", make_chrome_history), ("places.sqlite", make_firefox_history)):
+            path = make_history(tmp_path / name)
+            before = path.read_bytes()
+            source = client.post(f"/api/cases/{case}/evidence", params={"filename": name}, content=before, headers=HEADERS).json()["id"]
+            job = app.state.store.claim()
+            result = analyze(job, LIMITS, str(app.state.store.root / "work"))
+            app.state.store.finish(job, result)
+            originals[source] = (job["run_id"], result["sha256"])
+            assert path.read_bytes() == before
+        timeline = client.get(f"/api/cases/{case}/timeline").json()
+        assert timeline["total"] == 6
+        assert [event["at"] for event in timeline["events"]] == [
+            "2023-11-14T22:13:20.123456+00:00", "2023-11-14T22:13:20.123456+00:00",
+            "2023-11-14T22:14:20.123456+00:00", "2023-11-14T22:14:20.123456+00:00",
+            "2023-11-14T22:15:20.123456+00:00", "2023-11-14T22:15:20.123456+00:00",
+        ]
+        assert all(event["origin"] == "record" for event in timeline["events"])
+        for event in timeline["events"]:
+            record = client.get(f"/api/evidence/{event['source_id']}/records/{event['record_id']}").json()
+            assert record["run_id"] == originals[event["source_id"]][0]
+            assert record["artifact_id"] == event["artifact_id"]
+        instant = "2023-11-14T22:13:20.123456Z"
+        exact = client.get(f"/api/cases/{case}/timeline", params={"start": instant, "end": instant, "limit": 1}).json()
+        assert exact["total"] == 2 and len(exact["events"]) == 1
+        second = client.get(f"/api/cases/{case}/timeline", params={"start": instant, "end": instant, "limit": 1, "offset": 1}).json()
+        assert second["events"][0]["id"] != exact["events"][0]["id"]
+        exported = client.get(f"/api/cases/{case}/records/export").json()
+        assert len(exported["items"]) == 6 and len(exported["evidence"]) == 2
+        assert {item["parser"] for item in exported["items"]} == {"chrome-history/1", "firefox-history/1"}
+        assert {item["details"]["browser"] for item in exported["items"]} == {"Chrome/Chromium", "Firefox"}
+        assert all(item["source_sha256"] == originals[item["evidence_id"]][1] for item in exported["items"])

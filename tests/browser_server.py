@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from cds.analysis import analyze
 from cds.config import Settings
 from cds.main import create_app
-from scripts.make_browser_demo import make_chrome_history
+from scripts.make_browser_demo import make_chrome_history, make_firefox_history
 
 
 def build_app(root):
@@ -20,6 +20,12 @@ def build_app(root):
     def chrome_file():
         path = root / "work" / f"{uuid4()}.sqlite"
         make_chrome_history(path, count=120)
+        return FileResponse(path)
+
+    @app.get("/test/firefox-file")
+    def firefox_file():
+        path = root / "work" / f"{uuid4()}.sqlite"
+        make_firefox_history(path, count=120)
         return FileResponse(path)
 
     @app.post("/test/process")

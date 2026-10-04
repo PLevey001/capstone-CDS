@@ -18,7 +18,7 @@ jobs:
       - run: python -m pytest -q
       - run: npm ci && npm run format:check && npm run build
         working-directory: frontend
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium firefox
         working-directory: frontend
       - run: npm run test:e2e
         working-directory: frontend

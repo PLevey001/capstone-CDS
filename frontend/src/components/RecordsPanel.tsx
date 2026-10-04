@@ -188,8 +188,8 @@ export default function RecordsPanel({
               </button>
               <p className="muted">
                 A recorded visit alone does not identify a person or prove
-                activity on this device. Sync and import fields, when available,
-                are retained below.
+                activity on this device. Original fields retained by this parser
+                are listed below.
               </p>
               <details>
                 <summary>Original fields and parsing notes</summary>

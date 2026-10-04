@@ -162,7 +162,7 @@ def test_content_failure_keeps_source_inventory_and_hash(history, tmp_path, monk
     result = analyze_file(history, tmp_path / "work")
     assert "error" not in result and result["sha256"] and len(result["artifacts"]) == 1
     assert not result["records"]
-    step = next(step for step in result["coverage"]["steps"] if step["id"] == "chrome-history")
+    step = next(step for step in result["coverage"]["steps"] if step["id"] == "browser-history")
     assert step["status"] == "failed" and step["reason"] == reason
     assert result["coverage"]["status"] == "partial"
     assert not list((tmp_path / "work").glob("content-*"))
