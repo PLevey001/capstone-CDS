@@ -1039,6 +1039,93 @@ label > select {
 .timeline-artifact pre {
   white-space: pre-wrap;
 }
+.evidence-views,
+.record-exports,
+.record-heading {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin: 16px 0;
+}
+.evidence-views [aria-pressed="true"] {
+  border-color: #23776f;
+  background: #edf7f3;
+  color: #23776f;
+}
+.record-count {
+  display: block;
+  font-size: 10px;
+  color: #687d8c;
+  margin-top: 5px;
+}
+.records-panel {
+  margin: 18px 0;
+  font-size: 12px;
+}
+.records-panel h3 {
+  font-size: 14px;
+}
+.records-panel > p {
+  margin: 10px 0;
+}
+.record-detail {
+  border: 1px solid #dce4e9;
+  border-radius: 8px;
+  background: #f5f8f7;
+  padding: 14px;
+  margin: 16px 0;
+  overflow-wrap: anywhere;
+}
+.record-heading {
+  margin: 0 0 12px;
+  justify-content: space-between;
+}
+.record-detail dl {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+}
+.record-detail dd {
+  margin: 0;
+}
+.record-detail dt {
+  color: #687d8c;
+}
+.record-detail pre {
+  white-space: pre-wrap;
+  font-size: 11px;
+}
+.record-source {
+  white-space: normal;
+  text-align: left;
+}
+.record-detail p,
+.record-detail details {
+  margin-top: 14px;
+}
+.record-list {
+  max-height: 420px;
+  overflow-y: auto;
+}
+.record-row {
+  display: grid;
+  gap: 6px;
+  text-align: left;
+  padding: 13px 6px;
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid #edf1f4;
+  background: white;
+  overflow-wrap: anywhere;
+}
+.record-row:hover,
+.record-row[aria-pressed="true"] {
+  background: #edf7f3;
+}
+.record-row small {
+  color: #687d8c;
+}
 .drawer {
   position: fixed;
   inset: 0 0 0 auto;

@@ -69,6 +69,7 @@ export default function App() {
     id: string;
     runId?: string;
     artifactId?: number;
+    recordId?: number;
   } | null>(null);
   const [caseAction, setCaseAction] = useState<"rename" | "delete" | null>(
     null,
@@ -338,13 +339,13 @@ export default function App() {
               foot={`${queued} queued · ${health?.workers || 2} worker slots`}
             />
             <Stat
-              label="Artifacts indexed"
+              label="File artifacts indexed"
               value={evidence.reduce((sum, e) => sum + e.artifact_count, 0)}
               icon={<FileSearch size={19} />}
               foot={
                 failed
                   ? `${failed} source${failed > 1 ? "s" : ""} need attention`
-                  : "Records within examined scope"
+                  : `${evidence.reduce((sum, e) => sum + e.record_count, 0)} parsed records saved`
               }
             />
           </div>
@@ -490,6 +491,10 @@ export default function App() {
                             </td>
                             <td className="mono">
                               {item.artifact_count.toLocaleString()}
+                              <small className="record-count">
+                                {item.record_count.toLocaleString()} parsed
+                                records
+                              </small>
                             </td>
                             <td className="date-cell">
                               {new Date(item.imported_at).toLocaleDateString(
@@ -601,6 +606,7 @@ export default function App() {
                     id: event.source_id,
                     runId: event.run_id ?? undefined,
                     artifactId: event.artifact_id ?? undefined,
+                    recordId: event.record_id ?? undefined,
                   })
                 }
               />
@@ -676,10 +682,11 @@ export default function App() {
       )}
       {selected && (
         <EvidenceDrawer
-          key={`${selected.id}:${selected.runId ?? ""}:${selected.artifactId ?? ""}`}
+          key={`${selected.id}:${selected.runId ?? ""}:${selected.artifactId ?? ""}:${selected.recordId ?? ""}`}
           id={selected.id}
           runId={selected.runId}
           artifactId={selected.artifactId}
+          recordId={selected.recordId}
           revision={evidence.find((e) => e.id === selected.id)?.run_id || ""}
           onClose={() => setSelected(null)}
         />
@@ -862,6 +869,10 @@ function UploadModal({
       <p className="modal-description">
         Sources are copied into this case and analyzed read-only. Select
         multiple files to queue them together.
+      </p>
+      <p className="modal-description">
+        Chrome history: add a standalone History database snapshot. Separate
+        browser journals are not examined in this version.
       </p>
       <input
         ref={input}

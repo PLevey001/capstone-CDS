@@ -10,14 +10,17 @@ import re
 import selectors
 import shutil
 import subprocess
+import sys
+import tempfile
 import time
 from pathlib import Path
 
 import cds.artifacts as artifact_rules
 import cds.config as config
 import cds.coverage as coverage_tools
+from cds.chrome_history import PARSER as CHROME_PARSER, SNAPSHOT_SCOPE
 
-PARSER_VERSION = "cds/0.2.1"
+PARSER_VERSION = "cds/0.3.0"
 
 
 class ToolLimitError(ValueError):
@@ -152,7 +155,7 @@ def parse_bodyfile(output, partition_offset, limit):
 
 def inspect_image(path, job, result, settings, work_dir):
     coverage = result["coverage"]
-    discovery = coverage["steps"][1]
+    discovery = coverage_tools.find(coverage, "partitions")
     coverage_tools.mark(discovery, "running", "discovering", "Discovering allocated partitions.")
     if not shutil.which("mmls") or not shutil.which("fls"):
         coverage_tools.mark(discovery, "failed", "missing_tool", "Install The Sleuth Kit (mmls and fls), then retry.")
@@ -181,7 +184,8 @@ def inspect_image(path, job, result, settings, work_dir):
     # Create every scope before applying limits so untouched partitions remain visible.
     inventories = [coverage_tools.step(f"filesystem:{offset}", f"Filesystem at sector {offset:,}", "sleuthkit/fls",
                                        partition_offset=offset, sector_size=sector) for offset in offsets]
-    coverage["steps"][2:] = inventories
+    coverage["steps"].remove(coverage_tools.find(coverage, "inventory"))
+    coverage["steps"].extend(inventories)
     if len(offsets) > 128:
         for item in inventories:
             coverage_tools.mark(item, "skipped", "partition_limit", "More than 128 partitions; outside prototype limits.")
@@ -233,8 +237,54 @@ def inspect_image(path, job, result, settings, work_dir):
     result["metadata"]["partition_note"] = "Observed layout at import; not historical device changes."
 
 
-def inspect_file(path, name, result):
-    content = result["coverage"]["steps"][1]
+def inspect_history(path, result, settings, work_dir):
+    coverage = result["coverage"]
+    limits = config.CONTENT_LIMITS
+    coverage["limits"].update(limits)
+    coverage["scope"] = "Source hash, file metadata, and supported Chrome/Chromium visits. " + SNAPSHOT_SCOPE
+    history = coverage_tools.step("chrome-history", "Chrome/Chromium history", CHROME_PARSER)
+    coverage["steps"].append(history)
+    coverage_tools.mark(history, "running", "parsing", "Reading a disposable database copy.")
+    result["warnings"].append(SNAPSHOT_SCOPE)
+    if path.stat().st_size > limits["content_file_bytes"]:
+        coverage_tools.mark(history, "skipped", "content_file_limit",
+                            f"Database exceeds the {limits['content_file_bytes']}-byte content parser limit.")
+        return
+    try:
+        with tempfile.TemporaryDirectory(prefix="content-", dir=work_dir) as directory:
+            copy = Path(directory) / "history.sqlite"
+            digest = hashlib.sha256()
+            copied = 0
+            with path.open("rb") as source, copy.open("xb") as target:
+                while chunk := source.read(min(1024**2, limits["content_file_bytes"] - copied + 1)):
+                    copied += len(chunk)
+                    if copied > limits["content_file_bytes"]:
+                        raise ToolLimitError("content_file_limit", "Database grew beyond the content parser size limit.")
+                    digest.update(chunk)
+                    target.write(chunk)
+            if digest.hexdigest() != result["sha256"]:
+                raise ValueError("Source changed between hashing and the browser parser copy; no visits were saved.")
+            timeout = min(settings["tool_timeout"], limits["content_timeout"])
+            report(work_dir, "Reading browser visits", 75)
+            args = [sys.executable, "-m", "cds.content_parser", "chrome-history", str(copy), json.dumps(limits)]
+            code, output, error = _capture(args, timeout, limits["record_payload_bytes"] + config.TOOL_STDERR_BYTES)
+        if code:
+            raise ValueError(error.strip()[:500] or "The browser parser exited without usable results.")
+        parsed = json.loads(output)
+        result["records"] = parsed.pop("records")
+        coverage_tools.mark(history, parsed["status"], parsed["reason"], parsed["detail"],
+                            processed=parsed["processed"], total=parsed["total"])
+        result["metadata"]["format"] = ("Chrome/Chromium history" if parsed["status"] in {"complete", "partial"}
+                                        else "SQLite candidate")
+        if parsed["status"] != "complete":
+            result["warnings"].append(parsed["detail"])
+    except (OSError, ValueError) as error:
+        coverage_tools.mark(history, "failed", getattr(error, "reason", "content_parser_error"), str(error)[:600])
+        result["warnings"].append(f"Browser history was not parsed: {str(error)[:500]}")
+
+
+def inspect_file(path, name, result, settings, work_dir):
+    content = coverage_tools.find(result["coverage"], "content")
     coverage_tools.mark(content, "running", "parsing", "Reading file metadata.")
     suffix = Path(name).suffix.lower()
     size = path.stat().st_size
@@ -243,7 +293,10 @@ def inspect_file(path, name, result):
     meta = result["metadata"]
     meta["mime_type_hint"] = mimetypes.guess_type(name)[0] or "application/octet-stream"
     meta["mime_note"] = "MIME hint is based on the filename, not verified content type."
-    if suffix == ".json":
+    if sample.startswith(b"SQLite format 3\0") or name.casefold() == "history" or suffix in {".db", ".sqlite", ".sqlite3"}:
+        coverage_tools.mark(content, "complete", "sqlite_candidate", "File metadata recorded; database schema is checked by the history parser.", processed=len(sample))
+        inspect_history(path, result, settings, work_dir)
+    elif suffix == ".json":
         if size > 4 * 1024**2:
             coverage_tools.mark(content, "skipped", "json_size_limit", "JSON exceeds the 4 MiB parser limit; source metadata only.")
             result["warnings"].append("JSON exceeds the 4 MiB parser limit; only source metadata was indexed.")
@@ -292,9 +345,9 @@ def inspect_file(path, name, result):
 def analyze(job, settings, work_dir):
     """One job per process. Always return serializable results, including failures."""
     result = {"sha256": job.get("sha256"), "metadata": {"parser_version": PARSER_VERSION},
-              "artifacts": [], "partitions": [], "warnings": []}
+              "artifacts": [], "records": [], "partitions": [], "warnings": []}
     coverage = result["coverage"] = coverage_tools.begin(job["kind"], job["size"], settings, PARSER_VERSION, job.get("run_id"))
-    integrity = coverage["steps"][0]
+    integrity = coverage_tools.find(coverage, "hash")
     coverage_tools.mark(integrity, "running", "hashing", "Reading source bytes for SHA-256.")
     try:
         path = Path(job["source_path"])
@@ -323,13 +376,13 @@ def analyze(job, settings, work_dir):
                             "All source bytes hashed." + (" Matches the previous analysis." if job.get("sha256") else " This is the initial recorded hash."), processed=consumed)
         result["metadata"].update({"size_bytes": size, "imported_at": job["imported_at"],
                                     "timestamp_note": "Import time is a CDS action, not the original file creation time."})
-        result["artifacts"].append({"path": job["name"], "kind": "source", "size": size,
+        result["artifacts"].append({"key": "source", "path": job["name"], "kind": "source", "size": size,
                                     "details": {"sha256": result["sha256"], "parser": PARSER_VERSION}})
         if job["kind"] == "raw_image":
             inspect_image(path, job, result, settings, work_dir)
         else:
             report(work_dir, "Parsing file metadata", 70)
-            inspect_file(path, job["name"], result)
+            inspect_file(path, job["name"], result, settings, work_dir)
         report(work_dir, "Saving findings", 95)
     except Exception as error:
         result["error"] = f"{type(error).__name__}: {error}"[:2000]

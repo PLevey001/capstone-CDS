@@ -1,4 +1,4 @@
-"""Add saved runs without discarding results from older workspaces."""
+"""Add saved runs and parsed records without discarding older results."""
 
 import json
 from uuid import uuid4
@@ -59,3 +59,21 @@ def migrate_history(db):
         for table in ("artifacts", "partitions"):
             db.execute(f"UPDATE {table} SET run_id=? WHERE evidence_id=? AND run_id IS NULL", (run_id, row["id"]))
         db.execute("UPDATE evidence SET result_run_id=?,coverage=? WHERE id=?", (run_id, saved_coverage, row["id"]))
+
+
+def migrate_records(db):
+    # Runs inside the history migration's transaction, including the indexes.
+    db.execute("CREATE UNIQUE INDEX IF NOT EXISTS artifacts_owner ON artifacts(id,evidence_id,run_id)")
+    db.execute("""CREATE TABLE IF NOT EXISTS parsed_records (
+        id INTEGER PRIMARY KEY,
+        evidence_id TEXT NOT NULL REFERENCES evidence(id),
+        run_id TEXT NOT NULL REFERENCES analysis_runs(id),
+        artifact_id INTEGER NOT NULL,
+        kind TEXT NOT NULL, source_key TEXT NOT NULL,
+        event_time_us INTEGER, summary TEXT NOT NULL,
+        parser TEXT NOT NULL, details TEXT NOT NULL,
+        FOREIGN KEY(artifact_id,evidence_id,run_id) REFERENCES artifacts(id,evidence_id,run_id),
+        UNIQUE(run_id,artifact_id,kind,source_key,parser)
+    )""")
+    db.execute("CREATE INDEX IF NOT EXISTS records_run ON parsed_records(evidence_id,run_id,id)")
+    db.execute("CREATE INDEX IF NOT EXISTS records_time ON parsed_records(run_id,event_time_us,id)")

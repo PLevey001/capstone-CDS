@@ -10,7 +10,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import cds.artifacts as artifact_rules
-from cds.migrations import migrate_history
+import cds.config as config
+import cds.timestamps as timestamps
+from cds.migrations import migrate_history, migrate_records
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +85,7 @@ class Store:
                 );
             """)
             migrate_history(db)
+            migrate_records(db)
         self.cleanup_deleted_files()
 
     @staticmethod
@@ -140,7 +143,7 @@ class Store:
                          + [f"work/{job['id']}" for job in jobs] + [f"work/{run['id']}" for run in runs]))
             db.executemany("INSERT INTO pending_deletions(path,case_id) VALUES(?,?)",
                            [(path, case_id) for path in paths])
-            for table in ("artifacts", "partitions", "jobs"):
+            for table in ("parsed_records", "artifacts", "partitions", "jobs"):
                 db.execute(f"DELETE FROM {table} WHERE evidence_id IN (SELECT id FROM evidence WHERE case_id=?)",
                            (case_id,))
             db.execute("UPDATE evidence SET result_run_id=NULL WHERE case_id=?", (case_id,))
@@ -207,6 +210,7 @@ class Store:
                 SELECT e.*,e.result_run_id AS run_id,j.id AS job_id,j.status,j.stage,j.progress,
                   j.started_at,j.finished_at,j.error,j.active_run_id,j.status AS current_job_status,
                   (SELECT COUNT(*) FROM artifacts a WHERE a.evidence_id=e.id AND a.run_id=e.result_run_id) AS artifact_count,
+                  (SELECT COUNT(*) FROM parsed_records p WHERE p.evidence_id=e.id AND p.run_id=e.result_run_id) AS record_count,
                   (SELECT COUNT(*) FROM analysis_runs r WHERE r.evidence_id=e.id) AS run_count
                 FROM evidence e JOIN jobs j ON j.evidence_id=e.id
                 WHERE e.case_id=? ORDER BY e.imported_at DESC
@@ -237,12 +241,15 @@ class Store:
                 "SELECT * FROM partitions WHERE evidence_id=? AND run_id=? ORDER BY start_sector", (evidence_id, selected))]
             item["artifact_count"] = db.execute(
                 "SELECT COUNT(*) FROM artifacts WHERE evidence_id=? AND run_id=?", (evidence_id, selected)).fetchone()[0]
+            item["record_count"] = db.execute(
+                "SELECT COUNT(*) FROM parsed_records WHERE evidence_id=? AND run_id=?", (evidence_id, selected)).fetchone()[0]
             return item
 
     def runs(self, evidence_id):
         with self.connect() as db:
             rows = db.execute("""SELECT r.*,
-                (SELECT COUNT(*) FROM artifacts a WHERE a.evidence_id=r.evidence_id AND a.run_id=r.id) AS artifact_count
+                (SELECT COUNT(*) FROM artifacts a WHERE a.evidence_id=r.evidence_id AND a.run_id=r.id) AS artifact_count,
+                (SELECT COUNT(*) FROM parsed_records p WHERE p.evidence_id=r.evidence_id AND p.run_id=r.id) AS record_count
                 FROM analysis_runs r WHERE evidence_id=? ORDER BY sequence DESC""", (evidence_id,)).fetchall()
             items = []
             for row in rows:
@@ -301,6 +308,61 @@ class Store:
                 (evidence_id, artifact_id)).fetchone()
             return dict(row) if row else None
 
+    def decode_record(self, row):
+        item = self.decode(row)
+        item["at"] = timestamps.from_microseconds(item["event_time_us"]) if item["event_time_us"] is not None else None
+        return item
+
+    def records(self, evidence_id, query, offset, limit, run_id=None):
+        pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self.connect() as db:
+            db.execute("BEGIN")
+            source = db.execute("SELECT result_run_id FROM evidence WHERE id=?", (evidence_id,)).fetchone()
+            selected = run_id or (source["result_run_id"] if source else None)
+            where = """p.evidence_id=? AND p.run_id=? AND
+                (p.summary LIKE ? ESCAPE '\\' OR json_extract(p.details,'$.url') LIKE ? ESCAPE '\\')"""
+            params = (evidence_id, selected, pattern, pattern)
+            total = db.execute(f"SELECT COUNT(*) FROM parsed_records p WHERE {where}", params).fetchone()[0]
+            rows = db.execute(f"""SELECT p.*,a.path AS artifact_path FROM parsed_records p
+                JOIN artifacts a ON a.id=p.artifact_id WHERE {where} ORDER BY p.id LIMIT ? OFFSET ?""",
+                (*params, limit, offset))
+            return {"run_id": selected, "total": total, "items": [self.decode_record(row) for row in rows]}
+
+    def record(self, evidence_id, record_id):
+        with self.connect() as db:
+            row = db.execute("""SELECT p.*,a.path AS artifact_path FROM parsed_records p
+                JOIN artifacts a ON a.id=p.artifact_id WHERE p.evidence_id=? AND p.id=?""",
+                (evidence_id, record_id)).fetchone()
+            return self.decode_record(row) if row else None
+
+    def export_records(self, case_id, run_id=None, query=""):
+        pattern = "%" + query.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        with self.connect() as db:
+            db.execute("BEGIN")
+            case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+            if case is None:
+                return None
+            source_selection = "r.id=?" if run_id else "r.id=e.result_run_id"
+            source_params = (run_id, case_id) if run_id else (case_id,)
+            sources = [self.decode(row) for row in db.execute(f"""SELECT e.id,e.name,r.id AS run_id,
+                    r.sequence AS run_number,r.sha256,r.coverage,r.settings,r.warnings,r.status,r.error
+                FROM evidence e LEFT JOIN analysis_runs r ON r.evidence_id=e.id AND {source_selection}
+                WHERE e.case_id=? {"AND r.id IS NOT NULL" if run_id else ""} ORDER BY e.id""", source_params)]
+            if run_id and not sources:
+                return None
+            selection = "p.run_id=?" if run_id else "p.run_id=e.result_run_id"
+            params = (case_id, run_id, pattern, pattern) if run_id else (case_id, pattern, pattern)
+            rows = db.execute(f"""SELECT p.*,a.path AS artifact_path,e.name AS source_name,
+                    r.sha256 AS source_sha256,r.sequence AS run_number,
+                    COALESCE(json_extract(r.coverage,'$.status'),'unknown') AS coverage_status
+                FROM parsed_records p JOIN artifacts a ON a.id=p.artifact_id
+                JOIN evidence e ON e.id=p.evidence_id JOIN analysis_runs r ON r.id=p.run_id
+                WHERE e.case_id=? AND {selection}
+                  AND (p.summary LIKE ? ESCAPE '\\' OR json_extract(p.details,'$.url') LIKE ? ESCAPE '\\')
+                ORDER BY p.evidence_id,p.id""", params)
+            return {"case": dict(case), "selection": "selected_run" if run_id else "latest_saved_results",
+                    "query": query, "evidence": sources, "items": [self.decode_record(row) for row in rows]}
+
     def export_rows(self, case_id, run_id=None):
         """Export the latest results per source, or one selected historical run."""
         with self.connect() as db:
@@ -351,12 +413,12 @@ class Store:
                     "items": items, "evidence": evidence}
 
     def timeline_rows(self, case_id, start=None, end=None, offset=0, limit=100, revision=None):
-        """Chronological filesystem timestamps across a case's latest results.
+        """Chronological filesystem timestamps and parsed records from the latest saved runs.
 
         Emits one event per non-zero MAC time (accessed, modified, metadata
         changed, created) on each artifact in each source's result run. Zero
-        means unavailable, so it is skipped. Sources with no filesystem
-        timestamps still appear, anchored to when they were imported.
+        means unavailable, so it is skipped. Sources with no usable filesystem
+        or parsed-record time are anchored to when they were imported.
         Bounds, when supplied, are timezone-aware datetimes from the API.
         """
         labels = {"accessed": "Accessed", "modified": "Modified",
@@ -389,18 +451,29 @@ class Store:
                             except (OverflowError, OSError, ValueError, TypeError):
                                 continue
                             found = True
-                            events.append({"id": f"{source['id']}:{run_id}:{row['id']}:{key}", "run_id": run_id,
+                            events.append({"id": f"{source['id']}:{run_id}:{row['id']}:{key}", "run_id": run_id, "record_id": None,
                                 "at": when, "timestamp_kind": key, "timestamp_label": label,
                                 "origin": "filesystem", "source_id": source["id"], "source_name": source["name"],
                                 "artifact_id": row["id"], "artifact_path": row["path"],
                                 "artifact_kind": row["kind"], "deleted": bool(row["deleted"])})
+                    for row in db.execute("""SELECT p.id,p.artifact_id,p.event_time_us,p.summary,p.kind,
+                            a.path,a.kind AS artifact_kind,a.deleted FROM parsed_records p
+                        JOIN artifacts a ON a.id=p.artifact_id
+                        WHERE p.evidence_id=? AND p.run_id=? AND p.event_time_us IS NOT NULL""", (source["id"], run_id)):
+                        found = True
+                        events.append({"id": f"{source['id']}:{run_id}:record:{row['id']}", "run_id": run_id,
+                            "record_id": row["id"], "at": datetime.fromisoformat(timestamps.from_microseconds(row["event_time_us"])),
+                            "timestamp_kind": row["kind"], "timestamp_label": "Browser visit", "origin": "record",
+                            "summary": row["summary"], "source_id": source["id"], "source_name": source["name"],
+                            "artifact_id": row["artifact_id"], "artifact_path": row["path"],
+                            "artifact_kind": row["artifact_kind"], "deleted": bool(row["deleted"])})
                 if not found:
                     # Logical files and un-analyzed sources still belong on the timeline.
                     imported = datetime.fromisoformat(source["imported_at"])
                     if imported.tzinfo is None:
                         # Older workspaces may have import dates without an offset.
                         imported = imported.replace(tzinfo=timezone.utc)
-                    events.append({"id": f"{source['id']}:{run_id or 'pending'}:imported", "run_id": run_id,
+                    events.append({"id": f"{source['id']}:{run_id or 'pending'}:imported", "run_id": run_id, "record_id": None,
                         "at": imported, "timestamp_kind": "imported",
                         "timestamp_label": "Imported", "origin": "import", "source_id": source["id"],
                         "source_name": source["name"], "artifact_id": None,
@@ -496,10 +569,35 @@ class Store:
                 (status, stage, finished, digest, metadata, warnings, saved_coverage, settings, error, run_id))
             db.execute("UPDATE evidence SET sha256=?,metadata=?,warnings=?,coverage=?,result_run_id=? WHERE id=?",
                        (digest, metadata, warnings, saved_coverage, run_id, evidence_id))
+            artifact_ids = {}
             for item in result.get("artifacts", []):
-                db.execute("""INSERT INTO artifacts(evidence_id,run_id,path,kind,size,deleted,partition_offset,metadata_address,details)
+                inserted = db.execute("""INSERT INTO artifacts(evidence_id,run_id,path,kind,size,deleted,partition_offset,metadata_address,details)
                     VALUES(?,?,?,?,?,?,?,?,?)""", (evidence_id, run_id, item["path"], item["kind"], item.get("size"),
                     int(item.get("deleted", False)), item.get("partition_offset"), item.get("metadata_address"), json.dumps(item.get("details", {}))))
+                if "key" in item:
+                    if item["key"] in artifact_ids:
+                        raise ValueError("Duplicate local artifact key")
+                    artifact_ids[item["key"]] = inserted.lastrowid
+            records = result.get("records", [])
+            if len(records) > config.CONTENT_LIMITS["parsed_records"]:
+                raise ValueError("Parser returned too many records")
+            payload_bytes = 2
+            for record in records:
+                artifact_id = artifact_ids.get(record["artifact_key"])
+                if artifact_id is None:
+                    raise ValueError("Parsed record references an unknown local artifact key")
+                when = record["event_time_us"]
+                if when is not None:
+                    if type(when) is not int:
+                        raise ValueError("Parsed record timestamp must be integer microseconds")
+                    timestamps.from_microseconds(when)
+                payload_bytes += len(json.dumps(record, ensure_ascii=True).encode("utf-8")) + 2
+                if payload_bytes > config.CONTENT_LIMITS["record_payload_bytes"]:
+                    raise ValueError("Parser record payload exceeds the saved-run limit")
+                db.execute("""INSERT INTO parsed_records
+                    (evidence_id,run_id,artifact_id,kind,source_key,event_time_us,summary,parser,details)
+                    VALUES(?,?,?,?,?,?,?,?,?)""", (evidence_id, run_id, artifact_id, record["kind"], record["source_key"],
+                    when, record["summary"], record["parser"], json.dumps(record["details"])))
             for p in result.get("partitions", []):
                 db.execute("""INSERT INTO partitions(evidence_id,run_id,slot,start_sector,length_sectors,sector_size,description)
                     VALUES(?,?,?,?,?,?,?)""", (evidence_id, run_id, p["slot"], p["start_sector"], p["length_sectors"], p["sector_size"], p["description"]))

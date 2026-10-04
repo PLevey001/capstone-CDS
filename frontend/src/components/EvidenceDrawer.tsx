@@ -23,18 +23,21 @@ import {
 import AnalysisHistory from "./AnalysisHistory";
 import { CoverageDetails } from "./Coverage";
 import Status from "./Status";
+import RecordsPanel from "./RecordsPanel";
 
 export default function EvidenceDrawer({
   id,
   revision,
   runId,
   artifactId,
+  recordId,
   onClose,
 }: {
   id: string;
   revision: string;
   runId?: string;
   artifactId?: number;
+  recordId?: number;
   onClose: () => void;
 }) {
   const [detail, setDetail] = useState<Detail | null>(null),
@@ -46,7 +49,15 @@ export default function EvidenceDrawer({
     [expanded, setExpanded] = useState<number | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [selectedRun, setSelectedRun] = useState(runId || "");
-  const [focusedId, setFocusedId] = useState<number | null>(artifactId ?? null);
+  const [focusedId, setFocusedId] = useState<number | null>(
+    recordId ? null : (artifactId ?? null),
+  );
+  const [selectedRecord, setSelectedRecord] = useState<number | null>(
+    recordId ?? null,
+  );
+  const [view, setView] = useState<"files" | "records">(
+    recordId ? "records" : "files",
+  );
   const [focusedArtifact, setFocusedArtifact] = useState<Artifact | null>(null);
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
   const ref = useRef<HTMLDialogElement>(null);
@@ -167,6 +178,7 @@ export default function EvidenceDrawer({
               setArtifacts([]);
               setFocusedId(null);
               setFocusedArtifact(null);
+              setSelectedRecord(null);
             }}
           />
           <Status value={detail.status} />
@@ -181,13 +193,49 @@ export default function EvidenceDrawer({
               <p>{detail.error}</p>
             </div>
           )}
-          {focusedArtifact && (
+          <div className="evidence-views" aria-label="Evidence views">
+            <button
+              className="secondary-button"
+              aria-pressed={view === "files"}
+              onClick={() => setView("files")}
+            >
+              Files {detail.artifact_count}
+            </button>
+            <button
+              className="secondary-button"
+              aria-pressed={view === "records"}
+              onClick={() => setView("records")}
+            >
+              Records {detail.record_count}
+            </button>
+          </div>
+          {view === "records" && (
+            <RecordsPanel
+              key={detail.run_id || "pending"}
+              evidence={detail}
+              selectedId={selectedRecord}
+              onSelect={(recordId) => {
+                setSelectedRecord(recordId);
+                if (recordId !== null) setSelectedRun(detail.run_id || "");
+              }}
+              onSource={(artifactId) => {
+                setFocusedId(artifactId);
+                setFocusedArtifact(null);
+                setView("files");
+              }}
+            />
+          )}
+          {view === "files" && focusedArtifact && (
             <section
               className="timeline-artifact"
               aria-label="Selected timeline artifact"
             >
               <div className="artifact-heading">
-                <h3>Selected from timeline</h3>
+                <h3>
+                  {recordId || selectedRecord
+                    ? "Source artifact"
+                    : "Selected from timeline"}
+                </h3>
                 <button
                   className="icon-button"
                   aria-label="Clear selected artifact"
@@ -292,84 +340,91 @@ export default function EvidenceDrawer({
               ))}
             </section>
           )}
-          <div className="artifact-heading">
-            <h3>
-              Indexed artifacts <span>{total}</span>
-            </h3>
-            <span>
-              {detail.status === "queued" || detail.status === "running"
-                ? "Last saved results"
-                : "Source-linked records"}
-            </span>
-          </div>
-          <div className="search-input artifact-search">
-            <Search size={16} />
-            <input
-              aria-label="Search artifacts"
-              placeholder="Search paths…"
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                setOffset(0);
-              }}
-            />
-          </div>
-          <div className="artifact-list">
-            {artifacts.map((a) => (
-              <div className="artifact-item" key={a.id}>
-                <button
-                  onClick={() => setExpanded(expanded === a.id ? null : a.id)}
-                >
-                  {a.kind === "directory" ? (
-                    <Folder size={16} />
-                  ) : (
-                    <File size={16} />
-                  )}
-                  <span>
-                    <strong>{a.path}</strong>
-                    <small>
-                      {a.kind} · {bytes(a.size || 0)}
-                      {a.deleted ? " · deleted entry" : ""}
-                    </small>
-                  </span>
-                  <ChevronRight size={14} />
-                </button>
-                {expanded === a.id && (
-                  <div className="artifact-detail">
-                    <ArtifactDetails artifact={a} evidenceId={id} />
+          {view === "files" && (
+            <>
+              <div className="artifact-heading">
+                <h3>
+                  Indexed artifacts <span>{total}</span>
+                </h3>
+                <span>
+                  {detail.status === "queued" || detail.status === "running"
+                    ? "Last saved results"
+                    : "Files and directory entries"}
+                </span>
+              </div>
+              <div className="search-input artifact-search">
+                <Search size={16} />
+                <input
+                  aria-label="Search artifacts"
+                  placeholder="Search paths…"
+                  value={query}
+                  onChange={(e) => {
+                    setQuery(e.target.value);
+                    setOffset(0);
+                  }}
+                />
+              </div>
+              <div className="artifact-list">
+                {artifacts.map((a) => (
+                  <div className="artifact-item" key={a.id}>
+                    <button
+                      onClick={() =>
+                        setExpanded(expanded === a.id ? null : a.id)
+                      }
+                    >
+                      {a.kind === "directory" ? (
+                        <Folder size={16} />
+                      ) : (
+                        <File size={16} />
+                      )}
+                      <span>
+                        <strong>{a.path}</strong>
+                        <small>
+                          {a.kind} · {bytes(a.size || 0)}
+                          {a.deleted ? " · deleted entry" : ""}
+                        </small>
+                      </span>
+                      <ChevronRight size={14} />
+                    </button>
+                    {expanded === a.id && (
+                      <div className="artifact-detail">
+                        <ArtifactDetails artifact={a} evidenceId={id} />
+                      </div>
+                    )}
                   </div>
+                ))}
+                {!artifacts.length && (
+                  <p className="muted">
+                    {detail.status === "running" || detail.status === "queued"
+                      ? "Findings will appear when this source finishes."
+                      : "No matching indexed artifacts. Check the coverage above for unexamined scope."}
+                  </p>
                 )}
               </div>
-            ))}
-            {!artifacts.length && (
-              <p className="muted">
-                {detail.status === "running" || detail.status === "queued"
-                  ? "Findings will appear when this source finishes."
-                  : "No matching indexed artifacts. Check the coverage above for unexamined scope."}
-              </p>
-            )}
-          </div>
-          <div className="pagination">
-            <span>
-              {total ? offset + 1 : 0}–{Math.min(offset + 50, total)} of {total}
-            </span>
-            <button
-              className="icon-button"
-              aria-label="Previous artifact page"
-              disabled={offset === 0}
-              onClick={() => setOffset(offset - 50)}
-            >
-              <ChevronLeft size={17} />
-            </button>
-            <button
-              className="icon-button"
-              aria-label="Next artifact page"
-              disabled={offset + 50 >= total}
-              onClick={() => setOffset(offset + 50)}
-            >
-              <ChevronRight size={17} />
-            </button>
-          </div>
+              <div className="pagination">
+                <span>
+                  {total ? offset + 1 : 0}–{Math.min(offset + 50, total)} of{" "}
+                  {total}
+                </span>
+                <button
+                  className="icon-button"
+                  aria-label="Previous artifact page"
+                  disabled={offset === 0}
+                  onClick={() => setOffset(offset - 50)}
+                >
+                  <ChevronLeft size={17} />
+                </button>
+                <button
+                  className="icon-button"
+                  aria-label="Next artifact page"
+                  disabled={offset + 50 >= total}
+                  onClick={() => setOffset(offset + 50)}
+                >
+                  <ChevronRight size={17} />
+                </button>
+              </div>
+            </>
+          )}
         </>
       ) : (
         <div className="empty-state">

@@ -4,14 +4,34 @@ import tempfile
 from uuid import uuid4
 
 import uvicorn
+from fastapi.responses import FileResponse, HTMLResponse
 
+from cds.analysis import analyze
 from cds.config import Settings
 from cds.main import create_app
+from scripts.make_browser_demo import make_chrome_history
 
 
 def build_app(root):
     app = create_app(Settings(root), start_workers=False)
     store = app.state.store
+
+    @app.get("/test/chrome-file")
+    def chrome_file():
+        path = root / "work" / f"{uuid4()}.sqlite"
+        make_chrome_history(path, count=120)
+        return FileResponse(path)
+
+    @app.post("/test/process")
+    def process():
+        job = store.claim()
+        result = analyze(job, {"tool_timeout": 5, "max_artifacts": 50000}, str(root / "work"))
+        store.finish(job, result)
+        return {"run": job["run_id"]}
+
+    @app.get("/test/visited/{name}")
+    def visited(name: str):
+        return HTMLResponse("<title>Browser calibration page</title><p>Synthetic local visit</p>")
 
     @app.post("/test/seed")
     def seed():
