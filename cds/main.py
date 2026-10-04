@@ -268,17 +268,20 @@ def create_app(settings=None, start_workers=True):
 
     @app.get("/api/cases/{case_id}/timeline")
     def timeline(case_id: str, start: str = Query(default="", max_length=40),
-                 end: str = Query(default="", max_length=40)):
+                 end: str = Query(default="", max_length=40),
+                 offset: int = Query(default=0, ge=0), limit: int = Query(default=100, ge=1, le=200),
+                 revision: str = Query(default="", max_length=64)):
         """Filesystem timestamps across a case's latest results, in time order.
 
         Optional start/end are ISO-8601 UTC bounds (inclusive), e.g. 2026-09-20T00:00:00+00:00.
+        Supply the previous page's revision to reset pagination if saved results change.
         """
         require_case(case_id)
         start_time = timeline_bound(start, "start")
         end_time = timeline_bound(end, "end")
         if start_time is not None and end_time is not None and start_time > end_time:
             raise HTTPException(422, "start must be earlier than or equal to end.")
-        data = store.timeline_rows(case_id, start_time, end_time)
+        data = store.timeline_rows(case_id, start_time, end_time, offset, limit, revision)
         if data is None:
             raise HTTPException(404, "Case not found")
         return data

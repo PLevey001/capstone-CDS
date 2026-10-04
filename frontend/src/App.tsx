@@ -3,8 +3,6 @@ import {
   Activity,
   ArrowDownToLine,
   ArrowRight,
-  Check,
-  ChevronLeft,
   ChevronRight,
   CircleAlert,
   Clock,
@@ -30,22 +28,19 @@ import {
   api,
   bytes,
   date,
-  type Artifact,
-  type AnalysisRun,
   type Audit,
   type Case,
-  type Detail,
   type Evidence,
   type Health,
-  type Timeline,
 } from "./api";
 import Modal from "./components/Modal";
-import AnalysisHistory from "./components/AnalysisHistory";
+import EvidenceDrawer from "./components/EvidenceDrawer";
+import Status from "./components/Status";
+import TimelinePanel from "./components/TimelinePanel";
 import { DeleteCase, RenameCase } from "./components/CaseDialogs";
 
 import {
   CoverageBadge,
-  CoverageDetails,
   CoverageSummary,
   coverageState,
   type CoverageFilter,
@@ -54,31 +49,11 @@ import {
 type Tab = "evidence" | "activity" | "timeline";
 type UploadItem = { name: string; status: string; failed?: boolean };
 
-function Status({ value }: { value: Evidence["status"] }) {
-  return (
-    <span className={`status ${value}`}>
-      {value === "running" ? (
-        <LoaderCircle className="spin" size={12} />
-      ) : value === "completed" ? (
-        <Check size={12} />
-      ) : value === "failed" ? (
-        <CircleAlert size={12} />
-      ) : (
-        <span className="status-dot" />
-      )}
-      {value === "completed"
-        ? "Finished"
-        : value[0].toUpperCase() + value.slice(1)}
-    </span>
-  );
-}
-
 export default function App() {
   const [cases, setCases] = useState<Case[]>([]);
   const [caseId, setCaseId] = useState("");
   const [evidence, setEvidence] = useState<Evidence[]>([]);
   const [audit, setAudit] = useState<Audit[]>([]);
-  const [timeline, setTimeline] = useState<Timeline | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -90,7 +65,11 @@ export default function App() {
   );
   const [showCreate, setShowCreate] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
-  const [selected, setSelected] = useState("");
+  const [selected, setSelected] = useState<{
+    id: string;
+    runId?: string;
+    artifactId?: number;
+  } | null>(null);
   const [caseAction, setCaseAction] = useState<"rename" | "delete" | null>(
     null,
   );
@@ -118,24 +97,21 @@ export default function App() {
     const generation = ++pollGeneration.current;
     setEvidence([]);
     setAudit([]);
-    setTimeline(null);
-    setSelected("");
+    setSelected(null);
     setCoverageFilter("all");
     if (!caseId) return;
     let stopped = false;
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       try {
-        const [items, events, moments, system] = await Promise.all([
+        const [items, events, system] = await Promise.all([
           api<Evidence[]>(`/cases/${caseId}/evidence`),
           api<Audit[]>(`/cases/${caseId}/audit`),
-          api<Timeline>(`/cases/${caseId}/timeline`),
           api<Health>("/health"),
         ]);
         if (!stopped && generation === pollGeneration.current) {
           setEvidence(items);
           setAudit(events);
-          setTimeline(moments);
           setHealth(system);
         }
       } catch (e) {
@@ -398,7 +374,7 @@ export default function App() {
                 onClick={() => setTab("timeline")}
               >
                 <Clock size={16} />
-                Timeline <span>{timeline?.total ?? 0}</span>
+                Timeline
               </button>
               <span className="panel-note">
                 <ShieldCheck size={13} />
@@ -457,12 +433,12 @@ export default function App() {
                         {shown.map((item) => (
                           <tr
                             key={item.id}
-                            onClick={() => setSelected(item.id)}
+                            onClick={() => setSelected({ id: item.id })}
                           >
                             <td>
                               <button
                                 className="file-cell"
-                                onClick={() => setSelected(item.id)}
+                                onClick={() => setSelected({ id: item.id })}
                               >
                                 <span
                                   className={`file-icon ${item.kind === "raw_image" ? "image-icon" : ""}`}
@@ -613,41 +589,21 @@ export default function App() {
                 </p>
               </div>
             ) : (
-              <div className="activity-list">
-                {timeline && timeline.events.length ? (
-                  timeline.events.map((event, index) => (
-                    <div className="activity-row" key={index}>
-                      <span className="activity-icon">
-                        <Clock size={15} />
-                      </span>
-                      <div>
-                        <strong>
-                          {event.timestamp_label}
-                          {event.deleted ? " · deleted" : ""}
-                        </strong>
-                        <p>
-                          {event.artifact_path} · {event.source_name}
-                        </p>
-                      </div>
-                      <time>{date(event.at)}</time>
-                    </div>
-                  ))
-                ) : (
-                  <div className="empty-state">
-                    <Clock size={28} />
-                    <h2>No timestamps yet</h2>
-                    <p>
-                      Analyze a disk image to see file timestamps in
-                      chronological order.
-                    </p>
-                  </div>
-                )}
-                <p className="audit-note">
-                  Ordered by filesystem timestamp (accessed, modified, metadata
-                  changed, created). Zero timestamps are omitted. Filesystem
-                  timestamps do not prove user actions.
-                </p>
-              </div>
+              <TimelinePanel
+                key={caseId}
+                caseId={caseId}
+                sourceRevision={evidence
+                  .map((item) => `${item.id}:${item.run_id ?? ""}`)
+                  .sort()
+                  .join("|")}
+                onSelect={(event) =>
+                  setSelected({
+                    id: event.source_id,
+                    runId: event.run_id ?? undefined,
+                    artifactId: event.artifact_id ?? undefined,
+                  })
+                }
+              />
             )}
           </section>
           <div className="workspace-footer">
@@ -694,8 +650,7 @@ export default function App() {
             setCaseId(remaining[0]?.id || "");
             setEvidence([]);
             setAudit([]);
-            setTimeline(null);
-            setSelected("");
+            setSelected(null);
             setQuery("");
             setFilter("all");
             setTab("evidence");
@@ -721,9 +676,12 @@ export default function App() {
       )}
       {selected && (
         <EvidenceDrawer
-          id={selected}
-          revision={evidence.find((e) => e.id === selected)?.status || ""}
-          onClose={() => setSelected("")}
+          key={`${selected.id}:${selected.runId ?? ""}:${selected.artifactId ?? ""}`}
+          id={selected.id}
+          runId={selected.runId}
+          artifactId={selected.artifactId}
+          revision={evidence.find((e) => e.id === selected.id)?.run_id || ""}
+          onClose={() => setSelected(null)}
         />
       )}
     </div>
@@ -1016,333 +974,5 @@ function UploadModal({
         )}
       </div>
     </Modal>
-  );
-}
-
-function EvidenceDrawer({
-  id,
-  revision,
-  onClose,
-}: {
-  id: string;
-  revision: string;
-  onClose: () => void;
-}) {
-  const [detail, setDetail] = useState<Detail | null>(null),
-    [artifacts, setArtifacts] = useState<Artifact[]>([]);
-  const [total, setTotal] = useState(0),
-    [offset, setOffset] = useState(0),
-    [query, setQuery] = useState("");
-  const [error, setError] = useState(""),
-    [expanded, setExpanded] = useState<number | null>(null);
-  const [retrying, setRetrying] = useState(false);
-  const [selectedRun, setSelectedRun] = useState("");
-  const [runs, setRuns] = useState<AnalysisRun[]>([]);
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    ref.current?.showModal();
-  }, []);
-  useEffect(() => {
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
-    const refresh = async () => {
-      try {
-        const runQuery = selectedRun
-          ? `?${new URLSearchParams({ run_id: selectedRun })}`
-          : "";
-        const [item, history] = await Promise.all([
-          api<Detail>(`/evidence/${id}${runQuery}`),
-          api<AnalysisRun[]>(`/evidence/${id}/runs`),
-        ]);
-        if (stopped) return;
-        // Bind artifact retrieval to the snapshot we just loaded. A new run
-        // finishing between requests must not mix old coverage with new rows.
-        const rows = item.run_id
-          ? await api<{ total: number; items: Artifact[] }>(
-              `/evidence/${id}/artifacts?${new URLSearchParams({ q: query, offset: String(offset), run_id: item.run_id })}`,
-            )
-          : { total: 0, items: [] };
-        if (!stopped) {
-          setDetail(item);
-          setRuns(history);
-          setArtifacts(rows.items);
-          setTotal(rows.total);
-          setError("");
-        }
-      } catch (e) {
-        if (!stopped) setError((e as Error).message);
-      }
-      if (!stopped) timer = setTimeout(refresh, 1500);
-    };
-    void refresh();
-    return () => {
-      stopped = true;
-      clearTimeout(timer);
-    };
-  }, [id, revision, query, offset, selectedRun]);
-  return (
-    <dialog
-      ref={ref}
-      className="drawer"
-      onCancel={(e) => {
-        e.preventDefault();
-        onClose();
-      }}
-    >
-      <div className="drawer-heading">
-        <span className="eyebrow">EVIDENCE DETAILS</span>
-        <button
-          className="icon-button"
-          aria-label="Close evidence details"
-          onClick={onClose}
-        >
-          <X size={21} />
-        </button>
-      </div>
-      {error && (
-        <p role="alert" className="form-error">
-          {error}
-        </p>
-      )}
-      {detail ? (
-        <>
-          <div className="drawer-title">
-            <span className="file-icon image-icon">
-              {detail.kind === "raw_image" ? (
-                <HardDrive size={25} />
-              ) : (
-                <File size={25} />
-              )}
-            </span>
-            <div>
-              <h2>{detail.name}</h2>
-              <p>
-                {bytes(detail.size)} ·{" "}
-                {detail.kind === "raw_image"
-                  ? "Raw disk image"
-                  : "Logical file"}
-              </p>
-            </div>
-          </div>
-          <AnalysisHistory
-            detail={detail}
-            runs={runs}
-            selected={selectedRun}
-            onSelect={(runId) => {
-              setSelectedRun(runId);
-              setOffset(0);
-              setQuery("");
-              setExpanded(null);
-              setDetail(null);
-              setArtifacts([]);
-            }}
-          />
-          <Status value={detail.status} />
-          <p className="stage-label">
-            {detail.status === "completed"
-              ? "Processing finished"
-              : detail.stage}
-            {detail.status === "running" ? ` · ${detail.progress}%` : ""}
-          </p>
-          {detail.error && (
-            <div className="error-detail">
-              <p>{detail.error}</p>
-            </div>
-          )}
-          <CoverageDetails evidence={detail} />
-          {(detail.current_job_status === "failed" ||
-            detail.current_job_status === "completed") && (
-            <div className="reanalyze-control">
-              <button
-                className="secondary-button"
-                disabled={retrying}
-                onClick={async () => {
-                  setRetrying(true);
-                  try {
-                    await api(`/evidence/${id}/retry`, { method: "POST" });
-                    setDetail({
-                      ...detail,
-                      status: selectedRun ? detail.status : "queued",
-                      current_job_status: "queued",
-                      stage: selectedRun ? detail.stage : "Queued",
-                      progress: selectedRun ? detail.progress : 0,
-                      error: selectedRun ? detail.error : null,
-                    });
-                    setOffset(0);
-                    setExpanded(null);
-                  } catch (e) {
-                    setError((e as Error).message);
-                  } finally {
-                    setRetrying(false);
-                  }
-                }}
-              >
-                {retrying
-                  ? "Queuing…"
-                  : detail.current_job_status === "failed"
-                    ? "Retry analysis"
-                    : "Analyze again"}
-              </button>
-              <small>
-                Starts a new run with current settings. All previous results are
-                kept.
-              </small>
-            </div>
-          )}
-          <div className="hash-block">
-            <label>
-              <Fingerprint size={14} />
-              SHA-256 · recorded for this result
-            </label>
-            <code>
-              {detail.sha256 ||
-                (detail.status === "queued" || detail.status === "running"
-                  ? "Available after hashing completes"
-                  : "Not recorded for this run")}
-            </code>
-          </div>
-          <div className="detail-meta">
-            <span>Imported</span>
-            <strong>{date(detail.imported_at)}</strong>
-            <span>Evidence ID</span>
-            <code>{detail.id}</code>
-          </div>
-          {detail.warnings.map((warning, i) => (
-            <div className="notice" key={i}>
-              <CircleAlert size={16} />
-              <span>{warning}</span>
-            </div>
-          ))}
-          <details className="metadata-box">
-            <summary>Source metadata</summary>
-            <pre>{JSON.stringify(detail.metadata, null, 2)}</pre>
-          </details>
-          {detail.partitions.length > 0 && (
-            <section className="partition-section">
-              <h3>Observed partitions</h3>
-              <p className="muted">
-                Layout present in this image; not a history of changes.
-              </p>
-              {detail.partitions.map((p) => (
-                <div className="partition-row" key={p.id}>
-                  <HardDrive size={18} />
-                  <div>
-                    <strong>{p.description}</strong>
-                    <small>
-                      Sector {p.start_sector.toLocaleString()} ·{" "}
-                      {bytes(p.length_sectors * p.sector_size)} ·{" "}
-                      {p.sector_size}-byte sectors
-                    </small>
-                  </div>
-                </div>
-              ))}
-            </section>
-          )}
-          <div className="artifact-heading">
-            <h3>
-              Indexed artifacts <span>{total}</span>
-            </h3>
-            <span>
-              {detail.status === "queued" || detail.status === "running"
-                ? "Last saved results"
-                : "Source-linked records"}
-            </span>
-          </div>
-          <div className="search-input artifact-search">
-            <Search size={16} />
-            <input
-              aria-label="Search artifacts"
-              placeholder="Search paths…"
-              value={query}
-              onChange={(e) => {
-                setQuery(e.target.value);
-                setOffset(0);
-              }}
-            />
-          </div>
-          <div className="artifact-list">
-            {artifacts.map((a) => (
-              <div className="artifact-item" key={a.id}>
-                <button
-                  onClick={() => setExpanded(expanded === a.id ? null : a.id)}
-                >
-                  {a.kind === "directory" ? (
-                    <Folder size={16} />
-                  ) : (
-                    <File size={16} />
-                  )}
-                  <span>
-                    <strong>{a.path}</strong>
-                    <small>
-                      {a.kind} · {bytes(a.size || 0)}
-                      {a.deleted ? " · deleted entry" : ""}
-                    </small>
-                  </span>
-                  <ChevronRight size={14} />
-                </button>
-                {expanded === a.id && (
-                  <div className="artifact-detail">
-                    <p>
-                      Run: <code>{a.run_id}</code> · Artifact ID: {a.id}
-                    </p>
-                    <p>
-                      Partition sector: {a.partition_offset ?? "N/A"} · Metadata
-                      address: {a.metadata_address ?? "N/A"}
-                    </p>
-                    {a.download.available ? (
-                      <p>
-                        <a
-                          className="secondary-button"
-                          href={`/api/evidence/${id}/artifacts/${a.id}/download`}
-                        >
-                          <ArrowDownToLine size={14} />
-                          {a.deleted ? "Recover file" : "Download file"}
-                        </a>
-                      </p>
-                    ) : (
-                      <p className="muted">{a.download.reason}</p>
-                    )}
-                    <pre>{JSON.stringify(a.details, null, 2)}</pre>
-                  </div>
-                )}
-              </div>
-            ))}
-            {!artifacts.length && (
-              <p className="muted">
-                {detail.status === "running" || detail.status === "queued"
-                  ? "Findings will appear when this source finishes."
-                  : "No matching indexed artifacts. Check the coverage above for unexamined scope."}
-              </p>
-            )}
-          </div>
-          <div className="pagination">
-            <span>
-              {total ? offset + 1 : 0}–{Math.min(offset + 50, total)} of {total}
-            </span>
-            <button
-              className="icon-button"
-              aria-label="Previous artifact page"
-              disabled={offset === 0}
-              onClick={() => setOffset(offset - 50)}
-            >
-              <ChevronLeft size={17} />
-            </button>
-            <button
-              className="icon-button"
-              aria-label="Next artifact page"
-              disabled={offset + 50 >= total}
-              onClick={() => setOffset(offset + 50)}
-            >
-              <ChevronRight size={17} />
-            </button>
-          </div>
-        </>
-      ) : (
-        <div className="empty-state">
-          <LoaderCircle className="spin" />
-          Loading evidence…
-        </div>
-      )}
-    </dialog>
   );
 }

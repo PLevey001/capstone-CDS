@@ -16,5 +16,9 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y sleuthkit
       - run: python -m pip install -r requirements-dev.txt
       - run: python -m pytest -q
-      - run: npm ci && npm run build
+      - run: npm ci && npm run format:check && npm run build
+        working-directory: frontend
+      - run: npx playwright install --with-deps chromium
+        working-directory: frontend
+      - run: npm run test:e2e
         working-directory: frontend

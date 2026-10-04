@@ -961,6 +961,84 @@ label > select {
   color: #98a5af;
   padding: 15px 0;
 }
+.timeline-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  padding: 14px 0;
+}
+.timeline-filters label {
+  display: grid;
+  gap: 6px;
+  font-size: 12px;
+  margin: 0;
+  flex: 1;
+  min-width: 200px;
+}
+.timeline-filters input {
+  padding: 9px;
+  margin: 0;
+  border: 1px solid #dce4e9;
+  border-radius: 6px;
+  color: #344659;
+  background: white;
+  font: inherit;
+  max-width: 100%;
+}
+.timeline-actions {
+  display: flex;
+  gap: 8px;
+}
+.timeline-range {
+  font-size: 12px;
+  color: #687d8c;
+  overflow-wrap: anywhere;
+}
+.timeline-state {
+  padding: 28px 0;
+}
+.timeline-events {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.timeline-event {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  color: inherit;
+  border: 0;
+  border-bottom: 1px solid #edf1f4;
+}
+.timeline-event:hover {
+  background: #f5f8f7;
+}
+.timeline-event-description {
+  min-width: 0;
+}
+.timeline-path {
+  display: block;
+  margin: 5px 0;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.timeline-event small {
+  color: #687d8c;
+  font-size: 10px;
+}
+.timeline-artifact {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid #dce4e9;
+  border-radius: 8px;
+  background: #f5f8f7;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.timeline-artifact pre {
+  white-space: pre-wrap;
+}
 .drawer {
   position: fixed;
   inset: 0 0 0 auto;
