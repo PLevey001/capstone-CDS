@@ -14,14 +14,14 @@ def pytest_sessionstart(session):
     if not session.config.getoption("--require-image-tests"):
         return
     missing = missing_tools()
-    for name in ("test_filesystems.py", "fixtures/populate_ntfs.c"):
+    for name in ("test_filesystems.py", "test_acceptance.py", "fixtures/populate_ntfs.c"):
         if not (Path(__file__).parent / name).is_file():
             missing.append(name)
     if missing:
         raise pytest.UsageError("Required image tests cannot run; missing: " + ", ".join(missing))
 
 
-IMAGE_TEST_MODULES = ("test_filesystems.py", "test_image_history.py", "test_image_registry.py", "test_image_evtx.py", "test_pipeline.py", "test_history.py")
+IMAGE_TEST_MODULES = ("test_acceptance.py", "test_filesystems.py", "test_image_history.py", "test_image_registry.py", "test_image_evtx.py", "test_pipeline.py", "test_history.py")
 
 
 def pytest_sessionfinish(session, exitstatus):

@@ -9,6 +9,11 @@ frontend/test-results/
 frontend/playwright-report/
 data/
 demo-evidence/
+# Keep the acceptance deliverables visible even when local excludes hide docs/.
+!/docs/
+/docs/*
+!/docs/acceptance.md
+!/docs/acceptance-performance.json
 *.egg-info/
 # Local configuration and credentials. Keep examples placeholder-only.
 .env
