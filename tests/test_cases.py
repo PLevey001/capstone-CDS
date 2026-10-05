@@ -406,6 +406,25 @@ def test_image_download_requires_a_valid_member_address(tmp_path):
         assert items[2]["download"] == {"available": True, "reason": None}
 
 
+def test_image_symlink_download_is_unavailable_in_list_detail_and_endpoint(tmp_path):
+    app = create_app(Settings(tmp_path), start_workers=False)
+    with TestClient(app) as client:
+        case = create_case(client)
+        eid = client.post(f"/api/cases/{case['id']}/evidence", params={"filename": "disk.img"},
+                          content=b"image fixture", headers=HEADERS).json()["id"]
+        app.state.store.finish(app.state.store.claim(), {"artifacts": [
+            {"path": "/link -> target.txt", "kind": "file", "metadata_address": "36",
+             "details": {"parser": "sleuthkit/fls", "mode": "l/lrwxrwxrwx"}},
+        ]})
+        route = f"/api/evidence/{eid}/artifacts"
+        item = client.get(route).json()["items"][0]
+        assert not item["download"]["available"] and "Symbolic links" in item["download"]["reason"]
+        assert client.get(f"{route}/{item['id']}").json()["download"] == item["download"]
+        response = client.get(f"{route}/{item['id']}/download")
+        assert response.status_code == 422
+        assert response.json()["detail"] == item["download"]["reason"]
+
+
 @pytest.fixture
 def timeline_client(tmp_path):
     app = create_app(Settings(tmp_path), start_workers=False)

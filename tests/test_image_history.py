@@ -21,7 +21,8 @@ CHROME = "/Users/examiner/AppData/Local/Google/Chrome/User Data/Default/History"
 FIREFOX = "/Users/examiner/AppData/Roaming/Mozilla/Firefox/Profiles/demo.default/places.sqlite"
 LIMITS = {"tool_timeout": 5, "max_artifacts": 200}
 TSK = pytest.mark.skipif(any(not shutil.which(tool) for tool in ("mmls", "fls", "icat")),
-                         reason="Install The Sleuth Kit for image browser tests")
+                         reason="Missing image browser tools: " + ", ".join(
+                             tool for tool in ("mmls", "fls", "icat") if not shutil.which(tool)))
 
 
 def browser_image(files, partitions=1):

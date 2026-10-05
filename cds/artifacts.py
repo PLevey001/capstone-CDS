@@ -13,6 +13,8 @@ def download_status(artifact, source_kind, current_run_id):
         reason = "Downloads are available from the current saved run only. Select the latest result to download."
     elif artifact["kind"] == "directory":
         reason = "Directories have no file contents to extract."
+    elif source_kind == "raw_image" and "l" in artifact.get("details", {}).get("mode", "")[:3]:
+        reason = "Symbolic links describe a target path; downloading their contents is not supported."
     elif source_kind == "raw_image":
         address = artifact.get("metadata_address")
         if not valid_metadata_address(address):

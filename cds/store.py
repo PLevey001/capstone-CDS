@@ -301,12 +301,16 @@ class Store:
         source path, which is never exposed through the normal API responses.
         """
         with self.connect() as db:
-            row = db.execute("""SELECT a.path,a.kind,a.deleted,a.metadata_address,a.partition_offset,a.run_id,
+            row = db.execute("""SELECT a.path,a.kind,a.deleted,a.metadata_address,a.partition_offset,a.run_id,a.details,
                     e.source_path,e.sector_size,e.kind AS source_kind,e.result_run_id
                 FROM artifacts a JOIN evidence e ON e.id=a.evidence_id
                 WHERE a.evidence_id=? AND a.id=?""",
                 (evidence_id, artifact_id)).fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            target = dict(row)
+            target["details"] = json.loads(target["details"])
+            return target
 
     def decode_record(self, row):
         item = self.decode(row)
