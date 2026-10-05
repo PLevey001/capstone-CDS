@@ -1,6 +1,31 @@
 name: Validate CDS
 on: [push, pull_request]
 jobs:
+  image-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The README advertises 3.11 or newer. Test that floor, not only CI's version.
+        python-version: ['3.11', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: sudo apt-get update && sudo apt-get install -y sleuthkit e2fsprogs ntfs-3g build-essential
+      - run: python -m pip install -r requirements-dev.txt
+      - name: Record filesystem tool versions
+        run: |
+          dpkg-query -W sleuthkit e2fsprogs ntfs-3g gcc
+          fls -V
+          mke2fs -V
+          debugfs -V
+          mkntfs -V
+          cc --version
+      - name: Backend suite with required image fixtures (no skips)
+        run: python -m pytest -q -ra --require-image-tests
   validate:
     runs-on: ubuntu-latest
     steps:
@@ -15,6 +40,8 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - run: sudo apt-get update && sudo apt-get install -y sleuthkit
       - run: python -m pip install -r requirements-dev.txt
+      # Keep the fast suite here too: the image-tests job needs a native toolchain
+      # and must never be the only place backend tests run.
       - run: python -m pytest -q
       - run: npm ci && npm run format:check && npm run build
         working-directory: frontend

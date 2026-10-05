@@ -59,6 +59,25 @@ def test_filter_count_precedes_pagination(timeline):
     assert data["events"][0]["at"] == bound
 
 
+def test_record_timestamp_labels_are_specific_and_unknown_kinds_stay_neutral(timeline):
+    client, store, case, source, _ = timeline
+    labels = {"browser_visit": "Browser visit", "registry_key": "Registry key last-write",
+              "windows_event": "Event creation time"}
+    unknown_kind = "future_record"
+    store.retry(source)
+    store.finish(store.claim(), {
+        "artifacts": [{"key": "source", "path": "/records", "kind": "file"}],
+        "records": [{"artifact_key": "source", "kind": kind, "source_key": kind,
+                     "event_time_us": 1700000000123456, "summary": kind,
+                     "parser": "fixture/1", "details": {}}
+                    for kind in [*labels, unknown_kind]],
+    })
+    events = client.get(f"/api/cases/{case}/timeline").json()["events"]
+    actual = {event["timestamp_kind"]: event["timestamp_label"] for event in events}
+    assert actual == {**labels, unknown_kind: f"Record timestamp ({unknown_kind})"}
+    assert actual[unknown_kind] not in labels.values()
+
+
 @pytest.mark.parametrize("params", [{"offset": -1}, {"limit": 0}, {"limit": 201}, {"revision": "x" * 65}])
 def test_invalid_page_parameters(timeline, params):
     client, _, case, _, _ = timeline

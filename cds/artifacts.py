@@ -3,14 +3,20 @@
 import re
 
 
+def valid_metadata_address(address):
+    return re.fullmatch(r"[0-9]+(?:-[0-9]+)*", str(address)) is not None
+
+
 def download_status(artifact, source_kind, current_run_id):
     reason = None
     if artifact["run_id"] != current_run_id:
         reason = "Downloads are available from the current saved run only. Select the latest result to download."
     elif artifact["kind"] == "directory":
         reason = "Directories have no file contents to extract."
+    elif source_kind == "raw_image" and "l" in artifact.get("details", {}).get("mode", "")[:3]:
+        reason = "Symbolic links describe a target path; downloading their contents is not supported."
     elif source_kind == "raw_image":
         address = artifact.get("metadata_address")
-        if address is None or not re.fullmatch(r"[0-9]+(?:-[0-9]+)*", str(address)):
+        if not valid_metadata_address(address):
             reason = "This artifact has no usable metadata address to extract."
     return {"available": reason is None, "reason": reason}

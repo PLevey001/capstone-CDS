@@ -198,7 +198,7 @@ export default function TimelinePanel({
                           {event.origin === "import"
                             ? "Imported into CDS · open source"
                             : event.origin === "record"
-                              ? "Parsed browser record · open visit"
+                              ? "Parsed record · open details"
                               : "Filesystem timestamp · open artifact"}
                         </small>
                       </span>

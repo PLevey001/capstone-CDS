@@ -13,6 +13,7 @@ import cds.artifacts as artifact_rules
 import cds.config as config
 import cds.timestamps as timestamps
 from cds.migrations import migrate_history, migrate_records
+from cds.records import EMPTY_RECORD_PAYLOAD_BYTES, record_size
 
 logger = logging.getLogger(__name__)
 
@@ -301,12 +302,16 @@ class Store:
         source path, which is never exposed through the normal API responses.
         """
         with self.connect() as db:
-            row = db.execute("""SELECT a.path,a.kind,a.deleted,a.metadata_address,a.partition_offset,a.run_id,
+            row = db.execute("""SELECT a.path,a.kind,a.deleted,a.metadata_address,a.partition_offset,a.run_id,a.details,
                     e.source_path,e.sector_size,e.kind AS source_kind,e.result_run_id
                 FROM artifacts a JOIN evidence e ON e.id=a.evidence_id
                 WHERE a.evidence_id=? AND a.id=?""",
                 (evidence_id, artifact_id)).fetchone()
-            return dict(row) if row else None
+            if row is None:
+                return None
+            target = dict(row)
+            target["details"] = json.loads(target["details"])
+            return target
 
     def decode_record(self, row):
         item = self.decode(row)
@@ -423,6 +428,8 @@ class Store:
         """
         labels = {"accessed": "Accessed", "modified": "Modified",
                   "metadata_changed": "Metadata changed", "created": "Created"}
+        record_labels = {"browser_visit": "Browser visit", "registry_key": "Registry key last-write",
+                         "windows_event": "Event creation time"}
         with self.connect() as db:
             db.execute("BEGIN")
             case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
@@ -463,7 +470,9 @@ class Store:
                         found = True
                         events.append({"id": f"{source['id']}:{run_id}:record:{row['id']}", "run_id": run_id,
                             "record_id": row["id"], "at": datetime.fromisoformat(timestamps.from_microseconds(row["event_time_us"])),
-                            "timestamp_kind": row["kind"], "timestamp_label": "Browser visit", "origin": "record",
+                            "timestamp_kind": row["kind"],
+                            "timestamp_label": record_labels.get(row["kind"], f"Record timestamp ({row['kind']})"),
+                            "origin": "record",
                             "summary": row["summary"], "source_id": source["id"], "source_name": source["name"],
                             "artifact_id": row["artifact_id"], "artifact_path": row["path"],
                             "artifact_kind": row["artifact_kind"], "deleted": bool(row["deleted"])})
@@ -515,6 +524,12 @@ class Store:
                 db.execute("""UPDATE jobs SET status='queued',stage='Requeued after restart',progress=0,
                     active_run_id=NULL,started_at=NULL,finished_at=NULL,error=NULL WHERE id=?""", (row["id"],))
                 self.event(db, row["case_id"], "analysis_requeued", f"Run {run_id} was interrupted", row["evidence_id"])
+                # A terminated worker cannot run TemporaryDirectory cleanup; keep saved results and progress files.
+                for temporary in (self.root / "work" / run_id).glob("content-*"):
+                    if temporary.is_symlink():
+                        temporary.unlink()
+                    elif temporary.is_dir():
+                        shutil.rmtree(temporary)
 
     def claim(self, settings=None, parser_version=None):
         with self.connect() as db:
@@ -581,7 +596,7 @@ class Store:
             records = result.get("records", [])
             if len(records) > config.CONTENT_LIMITS["parsed_records"]:
                 raise ValueError("Parser returned too many records")
-            payload_bytes = 2
+            payload_bytes = EMPTY_RECORD_PAYLOAD_BYTES
             for record in records:
                 artifact_id = artifact_ids.get(record["artifact_key"])
                 if artifact_id is None:
@@ -591,7 +606,7 @@ class Store:
                     if type(when) is not int:
                         raise ValueError("Parsed record timestamp must be integer microseconds")
                     timestamps.from_microseconds(when)
-                payload_bytes += len(json.dumps(record, ensure_ascii=True).encode("utf-8")) + 2
+                payload_bytes += record_size(record)
                 if payload_bytes > config.CONTENT_LIMITS["record_payload_bytes"]:
                     raise ValueError("Parser record payload exceeds the saved-run limit")
                 db.execute("""INSERT INTO parsed_records

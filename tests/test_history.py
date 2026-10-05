@@ -330,8 +330,9 @@ def test_case_deletion_removes_all_its_history_and_preserves_other_cases(workspa
 
 def test_real_image_rerun_preserves_limited_inventory(tmp_path):
     import shutil
-    if not shutil.which("fls") or not shutil.which("mmls"):
-        pytest.skip("Requires Sleuth Kit")
+    missing = [tool for tool in ("fls", "mmls") if not shutil.which(tool)]
+    if missing:
+        pytest.skip("Missing image tools: " + ", ".join(missing))
     store = Store(tmp_path)
     store.initialize()
     case = store.create_case("Image history", "")

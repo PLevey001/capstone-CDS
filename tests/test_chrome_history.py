@@ -208,12 +208,12 @@ def test_composite_keys_cannot_multiply_visits(history, table):
 
 
 def test_changed_source_is_not_paired_with_the_pre_copy_hash(history, tmp_path, monkeypatch):
-    inspect = analysis.inspect_history
+    inspect = analysis.inspect_records
     def change_source(path, result, settings, work_dir):
         with sqlite3.connect(path) as db:
             db.execute("UPDATE urls SET title='Changed' WHERE id=1")
         inspect(path, result, settings, work_dir)
-    monkeypatch.setattr(analysis, 'inspect_history', change_source)
+    monkeypatch.setattr(analysis, 'inspect_records', change_source)
     result = analyze_file(history, tmp_path / 'work')
     assert not result['records']
     assert result['coverage']['status'] == 'partial'
@@ -224,7 +224,7 @@ def test_changed_source_is_not_paired_with_the_pre_copy_hash(history, tmp_path, 
 def test_large_odd_integers_keep_every_digit(history):
     with sqlite3.connect(history) as db:
         db.execute('UPDATE visits SET visit_time=13344473600123457,originator_visit_id=9007199254740993 WHERE id=1')
-    record = parse(history)['records'][0]
+    record = parse(history, record_text_chars=4)['records'][0]
     assert record['event_time_us'] == 1700000000123457
     assert record['details']['original_timestamp'] == '13344473600123457'
     assert record['details']['originator_visit_id'] == '9007199254740993'

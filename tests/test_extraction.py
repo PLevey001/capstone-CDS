@@ -94,6 +94,19 @@ def test_extraction_rejects_unsuccessful_tool_output(monkeypatch, image_target, 
         analysis.extract_artifact(image_target)
 
 
+@pytest.mark.parametrize("diagnostic,detail", [
+    (" Unreadable file\n", "Unreadable file"),
+    ("", "icat could not read this file's contents."),
+    ("x" * 400, "x" * 300),
+])
+def test_download_failure_says_no_file_was_downloaded(monkeypatch, image_target, diagnostic, detail):
+    monkeypatch.setattr(analysis.shutil, "which", lambda name: "/usr/bin/icat")
+    monkeypatch.setattr(analysis, "_capture", lambda *args: (1, b"partial bytes", diagnostic))
+    with pytest.raises(ValueError) as caught:
+        analysis.extract_artifact(image_target)
+    assert str(caught.value) == f"Extraction failed; no file was downloaded. {detail}"
+
+
 @pytest.mark.parametrize("deleted", [False, True])
 def test_extraction_allows_empty_file_and_requests_deleted_recovery(monkeypatch, image_target, deleted):
     commands = []

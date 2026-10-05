@@ -4,7 +4,7 @@ import io
 import pytest
 from fastapi.testclient import TestClient
 
-from cds.analysis import ToolLimitError, analyze
+from cds.analysis import EVTX_SCOPE, IMAGE_CONTENT_LIMITS, REGISTRY_SCOPE, ToolLimitError, analyze
 from cds.config import Settings
 from cds.main import create_app
 from cds.store import Store, now
@@ -108,7 +108,25 @@ def test_empty_listing_is_complete_only_for_declared_scope(inspect, monkeypatch)
     assert result["coverage"]["status"] == "complete"
     assert steps(result)["filesystem:10"]["processed"] == 0
     assert steps(result)["filesystem:10"]["total"] is None
-    assert "File contents, unallocated space" in result["coverage"]["scope"]
+    assert "Other file contents, unallocated space" in result["coverage"]["scope"]
+
+
+@pytest.mark.parametrize("paths,registry,evtx", [
+    ([], False, False),
+    (["notes.txt"], False, False),
+    (["Users/examiner/AppData/Local/Google/Chrome/User Data/Default/History"], False, False),
+    (["Users/examiner/NTUSER.DAT"], True, False),
+    (["Windows/System32/winevt/Logs/System.evtx"], False, True),
+    (["Users/examiner/NTUSER.DAT", "Windows/System32/winevt/Logs/System.evtx"], True, True),
+])
+def test_image_disclaimers_only_describe_present_candidate_families(inspect, monkeypatch, paths, registry, evtx):
+    fake_image_tools(monkeypatch, {10: (0, "".join(bodyfile(path) for path in paths), "")})
+    # Even unexamined candidates need their family disclaimer; successful parsing is not required.
+    monkeypatch.setitem(IMAGE_CONTENT_LIMITS, "image_content_candidates", 0)
+    result = inspect("disk.img", kind="raw_image")
+    for text in (result["coverage"]["scope"], steps(result)["image-content"]["detail"]):
+        assert (REGISTRY_SCOPE in text) == registry
+        assert (EVTX_SCOPE in text) == evtx
 
 
 def test_filesystem_fallback_does_not_claim_partition_layout_known(inspect, monkeypatch):

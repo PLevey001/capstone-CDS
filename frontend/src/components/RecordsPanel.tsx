@@ -86,7 +86,7 @@ export default function RecordsPanel({
         Parsed records <span>{evidence.record_count}</span>
       </h3>
       <p className="muted">
-        Saved browser visits. Recorded URLs are displayed as evidence text.
+        Saved parsed records. Recorded values are displayed as evidence text.
       </p>
       {evidence.coverage?.scope && (
         <p className="muted">{evidence.coverage.scope}</p>
@@ -95,7 +95,7 @@ export default function RecordsPanel({
         <Search size={16} />
         <input
           aria-label="Search records"
-          placeholder="Search titles or URLs…"
+          placeholder="Search summaries or URLs…"
           maxLength={200}
           value={query}
           onChange={(event) => {
@@ -149,7 +149,7 @@ export default function RecordsPanel({
               aria-label="Selected record"
             >
               <div className="record-heading">
-                <h3>Browser visit</h3>
+                <h3>Saved record</h3>
                 <button
                   className="icon-button"
                   aria-label="Clear selected record"
@@ -159,19 +159,29 @@ export default function RecordsPanel({
                 </button>
               </div>
               <dl>
-                <dt>Browser schema</dt>
-                <dd>{String(selected.details.browser ?? "Not recorded")}</dd>
-                <dt>URL</dt>
-                <dd className="record-url">
-                  {String(selected.details.url ?? "URL record missing")}
-                </dd>
-                <dt>Title</dt>
-                <dd>{String(selected.details.title ?? "Not recorded")}</dd>
-                <dt>Visit time (UTC)</dt>
+                <dt>Record kind</dt>
+                <dd>{selected.kind}</dd>
+                <dt>Summary</dt>
+                <dd>{selected.summary}</dd>
+                {selected.kind === "browser_visit" && (
+                  <>
+                    <dt>Browser schema</dt>
+                    <dd>
+                      {String(selected.details.browser ?? "Not recorded")}
+                    </dd>
+                    <dt>URL</dt>
+                    <dd className="record-url">
+                      {String(selected.details.url ?? "URL record missing")}
+                    </dd>
+                    <dt>Title</dt>
+                    <dd>{String(selected.details.title ?? "Not recorded")}</dd>
+                  </>
+                )}
+                <dt>Timestamp (UTC)</dt>
                 <dd>
                   {selected.at ? utcDate(selected.at) : "No usable timestamp"}
                 </dd>
-                <dt>Original visit ID</dt>
+                <dt>Original record key</dt>
                 <dd>{selected.source_key}</dd>
                 <dt>Saved run</dt>
                 <dd>
@@ -187,9 +197,9 @@ export default function RecordsPanel({
                 Open source artifact: {selected.artifact_path}
               </button>
               <p className="muted">
-                A recorded visit alone does not identify a person or prove
-                activity on this device. Original fields retained by this parser
-                are listed below.
+                A record alone does not identify a person or establish their
+                actions. Original fields and timestamp semantics retained by
+                this parser are listed below.
               </p>
               <details>
                 <summary>Original fields and parsing notes</summary>
@@ -211,11 +221,13 @@ export default function RecordsPanel({
               >
                 <strong>{record.summary}</strong>
                 <span>
-                  {String(record.details.url ?? "URL record missing")}
+                  {record.kind === "browser_visit"
+                    ? String(record.details.url ?? "URL record missing")
+                    : record.kind}
                 </span>
                 <small>
                   {record.at ? utcDate(record.at) : "No usable timestamp"} ·
-                  Visit {record.source_key}
+                  Record {record.source_key}
                 </small>
               </button>
             ))}

@@ -60,7 +60,8 @@ def test_empty_file_and_csv_metadata(tmp_path):
     assert result["metadata"]["columns"] == ["time", "event"]
 
 
-@pytest.mark.skipif(not shutil.which("fls") or not shutil.which("mmls"), reason="Install The Sleuth Kit for image integration tests")
+@pytest.mark.skipif(not shutil.which("fls") or not shutil.which("mmls"),
+                    reason="Missing image tools: " + ", ".join(tool for tool in ("fls", "mmls") if not shutil.which(tool)))
 @pytest.mark.parametrize("partitioned", [False, True])
 def test_actual_disk_image_inventory_and_deleted_entry(tmp_path, partitioned):
     data = partitioned_image() if partitioned else fat12_image()
@@ -97,7 +98,8 @@ def test_missing_image_tools_is_an_explicit_failure(tmp_path, monkeypatch):
     assert result["sha256"]
 
 
-@pytest.mark.skipif(not shutil.which("fls") or not shutil.which("mmls"), reason="Requires TSK")
+@pytest.mark.skipif(not shutil.which("fls") or not shutil.which("mmls"),
+                    reason="Missing image tools: " + ", ".join(tool for tool in ("fls", "mmls") if not shutil.which(tool)))
 def test_malformed_image_and_explicit_inventory_limit(tmp_path):
     result = analyze_file(tmp_path, "bad.img", b"not a disk", "raw_image")
     assert "No supported filesystem" in result["error"]
@@ -224,7 +226,8 @@ def test_worker_limit_and_actual_parallel_processes(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(not shutil.which("fls") or not shutil.which("mmls") or not shutil.which("icat"),
-                    reason="Install The Sleuth Kit for file extraction tests")
+                    reason="Missing extraction tools: " + ", ".join(
+                        tool for tool in ("fls", "mmls", "icat") if not shutil.which(tool)))
 def test_extract_and_recover_files_from_disk_image(tmp_path):
     from scripts.make_demo import DELETED, NOTE
     with TestClient(create_app(Settings(tmp_path))) as client:
