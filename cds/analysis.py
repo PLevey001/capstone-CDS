@@ -18,10 +18,12 @@ from pathlib import Path
 import cds.artifacts as artifact_rules
 import cds.config as config
 import cds.coverage as coverage_tools
+from cds.evtx_records import SCOPE as EVTX_SCOPE
 from cds.history_records import SIDECAR_GAP_SCOPE, SNAPSHOT_SCOPE
+from cds.records import record_size
 from cds.registry_records import SCOPE as REGISTRY_SCOPE
 
-PARSER_VERSION = "cds/0.7.0"
+PARSER_VERSION = "cds/0.8.0"
 
 # Allow a modest multi-user image while capping extraction attempts and one worker's content stage at five minutes.
 # Preserve 5A's maximum extraction allowance (32 candidates of 64 MiB), now including sidecars.
@@ -192,7 +194,7 @@ def _parse_image_candidate(path, job, item, step, sidecars, result, settings, wo
     content = coverage_tools.find(result["coverage"], "image-content")
     reserved_bytes = 0
     with tempfile.TemporaryDirectory(prefix="content-", dir=work_dir) as directory:
-        copy = Path(directory) / ("hive.dat" if step["parser"] == "windows-registry/1" else "history.sqlite")
+        copy = Path(directory) / ("history.sqlite" if step["parser"] == "browser-history/1" else "content.bin")
         if len({part["path"] for part in sidecars}) != len(sidecars):
             raise ValueError("Multiple allocated entries match a sidecar path; the working set is ambiguous.")
         for part in [item, *sidecars]:
@@ -340,7 +342,7 @@ def inspect_image(path, job, result, settings, work_dir):
     limits = config.CONTENT_LIMITS
     deadline = time.monotonic() + IMAGE_CONTENT_LIMITS["image_content_timeout"]
     coverage["limits"].update({**limits, **IMAGE_CONTENT_LIMITS})
-    coverage["scope"] = ("Source hash, partition discovery, filesystem directory entries, browser visits, and Registry keys/values from "
+    coverage["scope"] = ("Source hash, partition discovery, filesystem directory entries, browser visits, Registry keys/values, and Windows events from "
                          "allocated content candidates in that inventory. Other file contents, unallocated space, "
                          "and unmatched paths are not examined. ")
     content = coverage_tools.step("image-content", "Image content candidates", PARSER_VERSION,
@@ -355,6 +357,7 @@ def inspect_image(path, job, result, settings, work_dir):
         r"\.mozilla/firefox)/[^/]+/places\.sqlite$", re.IGNORECASE)
     hive = re.compile(r"^/(?:Users|Documents and Settings)/[^/]+/NTUSER\.DAT$|"
                       r"^/(?:Windows|WINNT)/System32/config/(?:SYSTEM|SOFTWARE)$", re.IGNORECASE)
+    event_log = re.compile(r"^/(?:Windows|WINNT)/System32/winevt/Logs/[^/]+$", re.IGNORECASE)
     allocated_files = {}
     for item in result["artifacts"]:
         if item["kind"] == "file" and not item["deleted"]:
@@ -363,20 +366,27 @@ def inspect_image(path, job, result, settings, work_dir):
     for item in result["artifacts"]:
         if item["kind"] != "file" or item["deleted"]:
             continue
-        registry = bool(hive.search(item["path"]))
-        if not registry and not profile.search(item["path"]):
+        if hive.search(item["path"]):
+            parser, scope = "windows-registry/1", REGISTRY_SCOPE
+        elif event_log.search(item["path"]):
+            # Every file in the standard log directory is a candidate, including renamed EVTX files.
+            parser, scope = "windows-event-log/1", EVTX_SCOPE
+        elif profile.search(item["path"]):
+            parser, scope = "browser-history/1", SNAPSHOT_SCOPE
+        else:
             continue
+        browser = parser == "browser-history/1"
         # Exact full paths and partitions prevent adopting another profile's journal. Do not case-fold paths.
-        sidecars = [] if registry else [part for suffix in ("-wal", "-shm")
+        sidecars = [] if not browser else [part for suffix in ("-wal", "-shm")
                     for part in allocated_files.get((item["partition_offset"], item["path"] + suffix), [])]
         for part in [item, *sidecars]:
             # Include the full path so hard links and equal metadata addresses in different partitions cannot collide.
             identity = json.dumps([part["partition_offset"], part["metadata_address"], part["path"]])
             part["key"] = "image:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
-        step = coverage_tools.step(item["key"], item["path"], "windows-registry/1" if registry else "browser-history/1",
+        step = coverage_tools.step(item["key"], item["path"], parser, scope=scope,
                                    artifact_key=item["key"], partition_offset=item["partition_offset"],
                                    metadata_address=item["metadata_address"], extracted=False)
-        if not registry:
+        if browser:
             step.update(sidecar_status="unusable" if sidecars else "absent",
                         sidecar_scope=SIDECAR_GAP_SCOPE if sidecars else (
                             "No allocated WAL/SHM sidecars were present in the available inventory; base database only. "
@@ -388,7 +398,7 @@ def inspect_image(path, job, result, settings, work_dir):
         coverage["steps"].append(step)
         candidates.append((item, step, sidecars))
     inventory_complete = discovery["status"] == "complete" and all(item["status"] == "complete" for item in inventories)
-    coverage_tools.mark(content, "running", "parsing", "Checking allocated browser and Registry candidates from the inventory.",
+    coverage_tools.mark(content, "running", "parsing", "Checking allocated browser, Registry, and event-log candidates from the inventory.",
                         total=len(candidates), candidates_found=len(candidates))
     attempted = 0
     payload_bytes = 2  # Match the saved-run array accounting in Store.finish, including remapped artifact keys.
@@ -397,7 +407,7 @@ def inspect_image(path, job, result, settings, work_dir):
         skip = _image_candidate_skip_reason(item, deadline, attempted, len(result["records"]), payload_stopped)
         if skip:
             reason, detail = skip
-            coverage_tools.mark(step, "skipped", reason, detail + " " + step.get("sidecar_scope", REGISTRY_SCOPE))
+            coverage_tools.mark(step, "skipped", reason, detail + " " + step.get("sidecar_scope", step["scope"]))
             continue
         attempted += 1
         # The existing 90-second content allowance covers extraction AND parsing for each candidate.
@@ -417,7 +427,7 @@ def inspect_image(path, job, result, settings, work_dir):
                                   detail=f"Saved {saved} records; content candidate time budget reached.")
                     break
                 record["artifact_key"] = item["key"]
-                size = len(json.dumps(record, ensure_ascii=True).encode("utf-8")) + 2
+                size = record_size(record)
                 # Inner keys are longer than "source"; recheck bytes after linking to keep the store's run bound exact.
                 if payload_bytes + size > limits["record_payload_bytes"]:
                     parsed.update(status="partial", reason="record_payload_limit",
@@ -428,7 +438,7 @@ def inspect_image(path, job, result, settings, work_dir):
                 saved += 1
             payload_stopped = parsed["reason"] == "record_payload_limit"
             detail = parsed["detail"].replace(SNAPSHOT_SCOPE, "").rstrip()
-            scope = step.get("sidecar_scope", REGISTRY_SCOPE)
+            scope = step.get("sidecar_scope", step["scope"])
             if scope not in detail:
                 detail += " " + scope
             status = parsed["status"] if parser_status in ("complete", "partial") else parser_status
@@ -436,7 +446,8 @@ def inspect_image(path, job, result, settings, work_dir):
                 detail += f" Unexpected parser status {status!r}; recorded as unknown."
                 status = "unknown"
             coverage_tools.mark(step, status, parsed["reason"], detail,
-                                processed=saved, total=parsed["total"])
+                                processed=saved, total=parsed["total"],
+                                **({"counts": parsed["counts"]} if "counts" in parsed else {}))
         except Exception as error:
             # A bad candidate must not discard the inventory or prevent other candidates from being read.
             reason = getattr(error, "reason", "content_parser_error")
@@ -474,11 +485,11 @@ def inspect_image(path, job, result, settings, work_dir):
               f"{counts['budget_stops']} budget stops. "
               + ("Inventory or partition discovery was incomplete; additional candidates may be missing. "
                  "Sidecars may also be missing from the available inventory. " if not inventory_complete else "")
-              + "Only matching paths in the inventory were considered; this does not establish complete browser or Registry activity. "
-              + journal_detail + REGISTRY_SCOPE)
+              + "Only matching paths in the inventory were considered; this does not establish complete browser, Registry, or event-log coverage. "
+              + journal_detail + REGISTRY_SCOPE + " " + EVTX_SCOPE)
     complete = inventory_complete and all(step["status"] == "complete" for _, step, _ in candidates)
     candidate_errors = any(status_counts.get(status, 0) for status in ("failed", "unsupported", "unknown"))
-    coverage["scope"] += " " + REGISTRY_SCOPE
+    coverage["scope"] += " " + REGISTRY_SCOPE + " " + EVTX_SCOPE
     coverage_tools.mark(content, "complete" if complete else "partial",
                         "inventory_incomplete" if not inventory_complete else "content_budget" if counts["budget_stops"]
                         else "candidate_errors" if candidate_errors else "candidates_examined" if complete else "candidates_partial",
@@ -491,9 +502,12 @@ def inspect_records(path, result, settings, work_dir, parser="browser-history"):
     coverage = result["coverage"]
     limits = config.CONTENT_LIMITS
     coverage["limits"].update(limits)
-    registry = parser == "windows-registry"
-    label = "Windows Registry" if registry else "Browser history"
-    scope = REGISTRY_SCOPE if registry else SNAPSHOT_SCOPE
+    if parser == "windows-registry":
+        label, scope, candidate = "Windows Registry", REGISTRY_SCOPE, "Registry candidate"
+    elif parser == "windows-event-log":
+        label, scope, candidate = "Windows event log", EVTX_SCOPE, "EVTX candidate"
+    else:
+        label, scope, candidate = "Browser history", SNAPSHOT_SCOPE, "SQLite candidate"
     coverage["scope"] = "Source hash, file metadata, and supported content records. " + scope
     records_step = coverage_tools.step(parser, label, parser + "/1")
     coverage["steps"].append(records_step)
@@ -505,7 +519,7 @@ def inspect_records(path, result, settings, work_dir, parser="browser-history"):
         return
     try:
         with tempfile.TemporaryDirectory(prefix="content-", dir=work_dir) as directory:
-            copy = Path(directory) / ("hive.dat" if registry else "history.sqlite")
+            copy = Path(directory) / "content.bin"
             digest = hashlib.sha256()
             copied = 0
             with path.open("rb") as source, copy.open("xb") as target:
@@ -527,9 +541,10 @@ def inspect_records(path, result, settings, work_dir, parser="browser-history"):
         result["records"] = parsed.pop("records")
         records_step.update({key: parsed[key] for key in ("id", "label", "parser")})
         coverage_tools.mark(records_step, parsed["status"], parsed["reason"], parsed["detail"],
-                            processed=parsed["processed"], total=parsed["total"])
+                            processed=parsed["processed"], total=parsed["total"],
+                            **({"counts": parsed["counts"]} if "counts" in parsed else {}))
         result["metadata"]["format"] = (parsed["label"] if parsed["status"] in {"complete", "partial"}
-                                        else "Registry candidate" if registry else "SQLite candidate")
+                                        else candidate)
         if parsed["status"] != "complete":
             result["warnings"].append(parsed["detail"])
     except (OSError, ValueError) as error:
@@ -547,11 +562,30 @@ def inspect_file(path, name, result, settings, work_dir):
     meta = result["metadata"]
     meta["mime_type_hint"] = mimetypes.guess_type(name)[0] or "application/octet-stream"
     meta["mime_note"] = "MIME hint is based on the filename, not verified content type."
-    if sample.startswith(b"regf") or name.casefold() in {"ntuser.dat", "system", "software"}:
+    # Signatures take precedence over filename hints, including deliberately misleading names.
+    if sample.startswith(b"ElfFile\0"):
+        parser = "windows-event-log"
+    elif sample.startswith(b"regf"):
+        parser = "windows-registry"
+    elif sample.startswith(b"SQLite format 3\0"):
+        parser = "browser-history"
+    elif suffix == ".evtx":
+        parser = "windows-event-log"
+    elif name.casefold() in {"ntuser.dat", "system", "software"}:
+        parser = "windows-registry"
+    elif name.casefold() == "history" or suffix in {".db", ".sqlite", ".sqlite3"}:
+        parser = "browser-history"
+    else:
+        parser = None
+    if parser == "windows-event-log":
+        coverage_tools.mark(content, "complete", "evtx_candidate",
+                            "File metadata recorded; EVTX structure is checked by the event-log parser.", processed=len(sample))
+        inspect_records(path, result, settings, work_dir, parser)
+    elif parser == "windows-registry":
         coverage_tools.mark(content, "complete", "registry_candidate",
                             "File metadata recorded; hive structure is checked by the Registry parser.", processed=len(sample))
         inspect_records(path, result, settings, work_dir, "windows-registry")
-    elif sample.startswith(b"SQLite format 3\0") or name.casefold() == "history" or suffix in {".db", ".sqlite", ".sqlite3"}:
+    elif parser == "browser-history":
         coverage_tools.mark(content, "complete", "sqlite_candidate", "File metadata recorded; database schema is checked by the history parser.", processed=len(sample))
         inspect_records(path, result, settings, work_dir)
     elif suffix == ".json":

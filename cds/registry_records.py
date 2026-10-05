@@ -1,11 +1,11 @@
 """Bounded ordinary hive records. No transaction-log replay or artifact interpretation."""
 
-import json
 import struct
 
 from Registry import RegistryParse
 
 import cds.timestamps as timestamps
+from cds.records import record_size
 
 PARSER = "windows-registry/1"
 SCOPE = ("Ordinary hive keys and values only. Transaction logs were not examined or replayed; "
@@ -224,7 +224,7 @@ def read_hive(path, limits):
             if truncated:
                 details["truncated_fields"] = truncated
             record["summary"] = record["summary"][:limits["record_text_chars"]]
-            size = len(json.dumps(record, ensure_ascii=True, allow_nan=False).encode("utf-8")) + 2
+            size = record_size(record)
             if payload_bytes + size > limits["record_payload_bytes"]:
                 result.update(status="partial", reason="record_payload_limit")
                 break

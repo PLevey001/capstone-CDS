@@ -1,12 +1,12 @@
 """Shared bounds and record handling for browser-history snapshots and working sets."""
 
 import contextlib
-import json
 import math
 import sqlite3
 import struct
 
 import cds.timestamps as timestamps
+from cds.records import record_size
 
 SNAPSHOT_SCOPE = "Standalone database snapshot only. Separate WAL/journal files were not supplied or examined."
 JOURNAL_SCOPE = ("Matching WAL/SHM sidecars were included in a disposable working set. "
@@ -179,7 +179,7 @@ def read_history(path, limits, readers, *, journal_aware=False):
                 record = {"artifact_key": "source", "kind": "browser_visit", "source_key": source_key,
                           "event_time_us": event_time, "summary": str(details["title"] or details["url"] or f"Visit {source_key}"),
                           "parser": result["parser"], "details": details}
-                size = len(json.dumps(record, ensure_ascii=True, allow_nan=False).encode("utf-8")) + 2
+                size = record_size(record)
                 if payload_bytes + size > limits["record_payload_bytes"]:
                     issues.append("Saved record payload reached its byte limit.")
                     result["reason"] = "record_payload_limit"
