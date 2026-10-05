@@ -74,7 +74,7 @@ def make_demo(directory):
 
 
 def make_acceptance(directory):
-    """One fixed case, composed from the shipped demo and Stage 6–8 builders.
+    """One fixed case, composed from the shipped demo and filesystem/Registry/EVTX builders.
 
     All answers below are construction inputs, never CDS/TSK parser output.
     Volume IDs and WAL salts can vary; logical answers are reproducible.
@@ -90,9 +90,9 @@ def make_acceptance(directory):
     if missing:
         raise RuntimeError("Missing acceptance fixture tools: " + ", ".join(missing))
     directory.mkdir(parents=True)  # Refuse to overwrite previous evidence or answers.
-    manifest = {"name": "Stage 10 · Combined acceptance", "sources": {}, "filesystems": {},
+    manifest = {"name": "Combined acceptance case", "sources": {}, "filesystems": {},
                 "not_covered": [
-                    "E01 deliberately excluded: local TSK 4.12.1/libewf 20140816 segfaults on EWF input; Stage 9 skipped.",
+                    "E01 deliberately excluded: local TSK 4.12.1/libewf 20140816 segfaults on EWF input.",
                     "Segmented uploads; standalone WAL replay; new parsers or record families.",
                     "Unallocated carving, encrypted/compressed content, NTFS alternate streams, ext2/ext3.",
                     "Registry transaction-log replay and deleted cells; EVTX message rendering and carved records.",
@@ -103,7 +103,7 @@ def make_acceptance(directory):
         manifest["sources"][name] = {"size": len(data), "sha256": hashlib.sha256(data).hexdigest(),
                                       "kind": kind, "sector_size": sector, "records": list(records)}
 
-    # Reuse Stage 6's source tree, replacing only the browser inputs for this case.
+    # Reuse the filesystem fixture source tree, replacing only the browser inputs.
     files = make_sources(directory / "browser-sources")
     browser_answers = []
     for name, profile, builder, table, column, epoch, parser, url_root in (
@@ -236,7 +236,7 @@ def make_acceptance(directory):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, default=Path("demo-evidence"))
-    parser.add_argument("--acceptance", action="store_true", help="Build the combined Stage 10 case (requires image tools)")
+    parser.add_argument("--acceptance", action="store_true", help="Build the combined acceptance case (requires image tools)")
     args = parser.parse_args()
     manifest = make_acceptance(args.output) if args.acceptance else make_demo(args.output)
     print(f"Created synthetic sources and a known-answer manifest in {args.output.resolve()}")

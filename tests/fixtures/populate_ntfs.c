@@ -1,4 +1,4 @@
-/* Unprivileged Stage 6 fixture writer, not an application dependency.
+/* Unprivileged NTFS fixture writer, not an application dependency.
  * Only opaque handles cross the ntfs-3g ABI; no private structure layouts.
  * Declarations: tuxera/ntfs-3g tag 2022.10.3, include/ntfs-3g/{dir,attrib,volume,inode}.h.
  */

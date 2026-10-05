@@ -6,7 +6,7 @@ Supported content includes Chrome/Chromium and Firefox history snapshots, Window
 
 The interface offers file inventory, saved records, coverage diagnostics, analysis history, downloads and CSV/JSON exports. One paginated UTC timeline combines filesystem MAC times, browser visits, Registry key last-write times and event creation times. Registry values do not receive invented timestamps. Reanalysis preserves historical results; downloads use only the current saved run. Coverage describes what was examined and any gaps, independently of whether a job finished.
 
-The [combined acceptance case and numbered walkthrough](docs/acceptance.md) define the demonstrated scope and limits. **E01 is deliberately excluded:** the local TSK 4.12.1/libewf 20140816 combination segfaults on EWF input, so Stage 9 was skipped and no EWF analysis path was added. Segmented uploads, unallocated carving, encryption, Registry log replay and rendered EVTX messages are not supported. This is not a certified forensic tool or a claim of unlimited image scale.
+The [combined acceptance case and numbered walkthrough](docs/acceptance.md) define the demonstrated scope and limits. **E01 is deliberately excluded:** the local TSK 4.12.1/libewf 20140816 combination segfaults on EWF input, so no EWF analysis path was added. Segmented uploads, unallocated carving, encryption, Registry log replay and rendered EVTX messages are not supported. This is not a certified forensic tool or a claim of unlimited image scale.
 
 ## Setup
 
@@ -60,7 +60,7 @@ With the app running, use a second terminal in the project folder:
 .venv/bin/python scripts/import_demo.py --acceptance
 ```
 
-Expect a new **Stage 10 · Combined acceptance** case with **14 sources and 469 records**, plus a source-side manifest under `demo-evidence/acceptance-*/sources/`. The command waits for analysis and verifies hashes and counts. Follow the [numbered walkthrough](docs/acceptance.md#numbered-walkthrough) for timeline ranges, saved-record provenance, extraction, qualified recovery, exports, history and cleanup. Failures are deliberately included in the case.
+Expect a new **Combined acceptance case** with **14 sources and 469 records**, plus a source-side manifest under `demo-evidence/acceptance-*/sources/`. The command waits for analysis and verifies hashes and counts. Follow the [numbered walkthrough](docs/acceptance.md#numbered-walkthrough) for timeline ranges, saved-record provenance, extraction, qualified recovery, exports, history and cleanup. Failures are deliberately included in the case.
 
 The original small USB demo remains available with `python3 scripts/import_demo.py`. It imports a FAT image, text, CSV and JSON. Generate those files alone with `python3 scripts/make_demo.py`. All samples are invented; no personal browser profiles or Windows logs are used.
 

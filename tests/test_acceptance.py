@@ -1,4 +1,4 @@
-"""Stage 10: one imported case, source-side answers, and real worker/API boundaries."""
+"""Combined acceptance: one imported case, source-side answers, and real worker/API boundaries."""
 
 import csv
 import hashlib

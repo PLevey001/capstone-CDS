@@ -1,6 +1,6 @@
-# Stage 10 combined acceptance
+# Combined acceptance case
 
-This is a reproducible, synthetic local prototype case. Expected records, timestamps, file sizes and SHA-256 hashes are constructed from the inputs in `scripts/make_demo.py::make_acceptance`, before CDS analyzes them. The builder reuses the existing browser, FAT, Stage 6 filesystem, Registry and EVTX builders. It never uses parser output as its oracle. WAL salts and filesystem-generated metadata can vary between builds; logical answers and known file bytes remain the same.
+This is a reproducible, synthetic local prototype case. Expected records, timestamps, file sizes and SHA-256 hashes are constructed from the inputs in `scripts/make_demo.py::make_acceptance`, before CDS analyzes them. The builder reuses the existing browser, FAT, NTFS/ext4, Registry and EVTX builders. It never uses parser output as its oracle. WAL salts and filesystem-generated metadata can vary between builds; logical answers and known file bytes remain the same.
 
 ## Build and import
 
@@ -34,7 +34,7 @@ The imported originals total **139,035,252 bytes**. Allow additional disk space 
 
 The expectations below are asserted through the real analysis workers and application API in `tests/test_acceptance.py`. **The interactive steps were not executed in this session:** no computer-use browser was available, the importer shell could not open sockets, and the Playwright server could not bind its port. The importer’s generation/upload/poll/verification path was exercised with TestClient HTTP transport. These are explicit verification limits, not a claim of a completed live UI rehearsal.
 
-1. **Open the combined case.** Refresh the app and select **Stage 10 · Combined acceptance**. Expect 14 sources and 469 records. Open each source to compare its SHA-256 to `manifest.json`. A completed job is not a statement of complete coverage: the unknown schema, damaged log and standalone journals have qualified coverage. The incomplete image has a failed analysis.
+1. **Open the combined case.** Refresh the app and select **Combined acceptance case**. Expect 14 sources and 469 records. Open each source to compare its SHA-256 to `manifest.json`. A completed job is not a statement of complete coverage: the unknown schema, damaged log and standalone journals have qualified coverage. The incomplete image has a failed analysis.
 
 2. **Inspect inventory and coverage.** Open `ntfs.img`, inspect its partition at sector **2048**, and search the file inventory for `History`, `places.sqlite`, `NTUSER.DAT` and `Application.evtx`. The two ordinary browser candidates each include matching WAL and SHM provenance and 61 visits. `MissingJournal/History` has only 60 visits and explicitly says base database only, with no sidecars in the available inventory. It must not borrow Default's journal. Open `ext4.img`: sector **0** is a readable bare volume, but its partition layout is unknown, so whole-image coverage is partial.
 
@@ -99,7 +99,7 @@ The combined review found browser-only wording in the shared Records drawer/list
 
 ## Exclusions and verification limits
 
-- **E01 is deliberately excluded.** On this machine TSK 4.12.1 links libewf 20140816 and segfaults on both single and segmented EWF input. Stage 9 was skipped for this reason. No E01 fixture or `-i ewf` path was added; E01 support is not claimed.
+- **E01 is deliberately excluded.** On this machine TSK 4.12.1 links libewf 20140816 and segfaults on both single and segmented EWF input. No E01 fixture or `-i ewf` path was added; E01 support is not claimed. Converting an E01 with `ewfexport -f raw` produces an image this tool can analyse.
 - Segmented uploads, standalone WAL replay, new parsers, new record families and new frontend features are outside this stage. The only UI changes correct browser-only wording in the shared record views.
 - No carving of unallocated space, encrypted/compressed content, NTFS alternate streams, ext2/ext3, Registry transaction-log replay/deleted-cell recovery, EVTX message rendering or carved-event recovery is established. Path discovery is limited to the shipped candidate rules. This is not forensic certification or exhaustive filesystem/browser/Windows version compatibility.
 - The clean-source check used an archive of `eaad057` plus this working diff, with no existing data or generated frontend. A fresh Python virtual environment installed the pinned requirements from cached wheels. Network installation failed because sandbox DNS was unavailable. `npm ci` also could not fetch uncached Vite 6.4.3; the clean-source build used the existing installed dependency tree. A completely fresh network dependency installation and interactive walkthrough remain unverified here. Local Python was 3.13.5 and Node was 26.7.0; CI uses Python 3.11/3.13 and Node 22.

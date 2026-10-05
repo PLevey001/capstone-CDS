@@ -1,4 +1,4 @@
-"""Repeat Stage 10's five-source API benchmark and real worker limit probe.
+"""Repeat the five-source API benchmark and real worker limit probe.
 
 The query fixture is synthetic saved data (not 50,000 extracted image events).
 The separate worker probes actually parse a browser database at default limits.
@@ -92,7 +92,7 @@ def benchmark(root):
     app = create_app(Settings(root / "workspace"), start_workers=False)
     with TestClient(app) as client:
         store = app.state.store
-        case = store.create_case("Stage 10 performance", "Synthetic saved query load, not an image parser benchmark")
+        case = store.create_case("Acceptance performance", "Synthetic saved query load, not an image parser benchmark")
         # Five sources, each with 2,500 files x four MAC times and 2,000
         # records cycling through the four timeline families' record kinds.
         for source_index in range(5):

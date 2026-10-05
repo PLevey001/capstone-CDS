@@ -16,7 +16,7 @@ from scripts.make_demo import make_acceptance, make_demo
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", default="http://127.0.0.1:8000")
-    parser.add_argument("--acceptance", action="store_true", help="Build, import, and verify the combined Stage 10 case")
+    parser.add_argument("--acceptance", action="store_true", help="Build, import, and verify the combined acceptance case")
     parser.add_argument("--output", type=Path, default=Path(__file__).resolve().parents[1] / "demo-evidence")
     args = parser.parse_args()
     directory = args.output

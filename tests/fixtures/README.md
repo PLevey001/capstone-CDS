@@ -1,4 +1,4 @@
-# Stage 6 filesystem evidence
+# Filesystem fixture evidence
 
 These fixtures demonstrate **NTFS 3.1** and **ext4 with the feature set below** through CDS's existing raw-image analysis and saved-record paths. They do not establish ext2, ext3, arbitrary NTFS/ext4 configurations, alternate data streams, compression, encryption, or mounted-kernel deletion behavior.
 

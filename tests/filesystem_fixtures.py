@@ -1,4 +1,4 @@
-"""Synthetic Stage 6 images and source-side manifests; never read CDS output here."""
+"""Synthetic NTFS/ext4 images and source-side manifests; never read CDS output here."""
 
 import argparse
 import ctypes.util
