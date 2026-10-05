@@ -18,12 +18,14 @@ from pathlib import Path
 import cds.artifacts as artifact_rules
 import cds.config as config
 import cds.coverage as coverage_tools
-from cds.history_records import SNAPSHOT_SCOPE
+from cds.history_records import SIDECAR_GAP_SCOPE, SNAPSHOT_SCOPE
 
-PARSER_VERSION = "cds/0.5.0"
+PARSER_VERSION = "cds/0.5.1"
 
 # Allow a modest multi-user image while capping extraction attempts and one worker's content stage at five minutes.
-IMAGE_CONTENT_LIMITS = {"image_content_candidates": 32, "image_content_timeout": 300}
+# Preserve 5A's maximum extraction allowance (32 candidates of 64 MiB), now including sidecars.
+IMAGE_CONTENT_LIMITS = {"image_content_candidates": 32, "image_content_timeout": 300,
+                        "image_content_bytes": 32 * 64 * 1024**2}
 
 
 class ToolLimitError(ValueError):
@@ -175,37 +177,66 @@ def _image_candidate_skip_reason(item, deadline, attempted, record_count, payloa
         return "record_payload_limit", "Image saved-record payload budget reached."
     if item["size"] > limits["content_file_bytes"]:
         return "content_file_limit", f"Candidate exceeds the {limits['content_file_bytes']}-byte content limit."
-    if not re.fullmatch(r"[0-9]+(?:-[0-9]+)*", str(item["metadata_address"])):
+    if not artifact_rules.valid_metadata_address(item["metadata_address"]):
         # Pre-save artifacts have not passed the download path's metadata-address eligibility check.
         return "invalid_metadata_address", "Candidate has no usable metadata address to extract."
     return None
 
 
-def _parse_image_candidate(path, job, item, step, result, settings, work_dir,
+def _parse_image_candidate(path, job, item, step, sidecars, result, settings, work_dir,
                            candidate_deadline, timeout_reason, payload_bytes):
+    # The parent subtracts payload_bytes from the subprocess budget (which counts placeholder "source" keys),
+    # rechecks after substituting longer artifact keys, and keeps payload_stopped set to skip later candidates.
     limits = config.CONTENT_LIMITS
+    history = coverage_tools.find(result["coverage"], "image-browser-history")
+    reserved_bytes = 0
     with tempfile.TemporaryDirectory(prefix="content-", dir=work_dir) as directory:
         copy = Path(directory) / "history.sqlite"
-        try:
-            data = _icat(path, job["sector_size"], item,
-                         min(settings["tool_timeout"], candidate_deadline - time.monotonic()),
-                         limits["content_file_bytes"])
-        except subprocess.CalledProcessError as error:
-            raise ValueError(f"Extraction failed. {error.stderr}") from error
-        step["extracted"] = True
-        item["details"]["content"] = {"sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
-                                      "evidence_id": job.get("id"), "run_id": result["coverage"]["run_id"],
-                                      "parser_version": PARSER_VERSION}
-        if len(data) != item["size"]:
-            raise ValueError("Extracted byte count differs from the inventory size; candidate was not parsed.")
-        copy.write_bytes(data)
-        del data
+        if len({part["path"] for part in sidecars}) != len(sidecars):
+            raise ValueError("Multiple allocated entries match a sidecar path; the working set is ambiguous.")
+        for part in [item, *sidecars]:
+            suffix = part["path"][len(item["path"]):]
+            label = "Candidate" if not suffix else f"Sidecar {part['path']}"
+            if part["size"] < 0 or not artifact_rules.valid_metadata_address(part["metadata_address"]):
+                raise ValueError(f"{label} has no usable size or metadata address to extract.")
+            if reserved_bytes + part["size"] > limits["content_file_bytes"]:
+                raise ToolLimitError("content_file_limit", f"{label} would exceed the candidate working-set byte budget.")
+            if history["extraction_bytes_reserved"] + part["size"] > IMAGE_CONTENT_LIMITS["image_content_bytes"]:
+                raise ToolLimitError("image_content_limit", f"{label} would exceed the image extraction-byte budget.")
+            remaining = candidate_deadline - time.monotonic()
+            if remaining <= 0:
+                raise ToolLimitError(timeout_reason, f"{label} was not extracted; browser candidate time budget reached.")
+            # Charge attempts even on failure; a failed tool may already have read the reserved bytes.
+            reserved_bytes += part["size"]
+            history["extraction_bytes_reserved"] += part["size"]
+            try:
+                data = _icat(path, job["sector_size"], part, min(settings["tool_timeout"], remaining), part["size"])
+            except subprocess.CalledProcessError as error:
+                prefix = "Extraction failed." if not suffix else f"Sidecar extraction failed ({part['path']})."
+                raise ValueError(f"{prefix} {error.stderr}") from error
+            except ToolLimitError as error:
+                raise ToolLimitError(error.reason, f"{label}: {error}") from error
+            part["details"]["content"] = {"sha256": hashlib.sha256(data).hexdigest(), "size_bytes": len(data),
+                                          "evidence_id": job.get("id"), "run_id": result["coverage"]["run_id"],
+                                          "artifact_key": part["key"], "parser_version": PARSER_VERSION, "parser": None}
+            if not suffix:
+                step["extracted"] = True
+                part["details"]["content"]["sidecars"] = step["sidecars"]
+            else:
+                provenance = next(entry for entry in step["sidecars"] if entry["artifact_key"] == part["key"])
+                provenance.update(sha256=part["details"]["content"]["sha256"], size_bytes=len(data), extracted=True)
+            if len(data) != part["size"]:
+                raise ValueError(f"{label}: extracted byte count differs from the inventory size; candidate was not parsed.")
+            (Path(directory) / ("history.sqlite" + suffix)).write_bytes(data)
+            del data
         remaining = candidate_deadline - time.monotonic()
         if remaining <= 0:
             raise ToolLimitError(timeout_reason, "Browser candidate time budget reached before parsing.")
         candidate_limits = {**limits, "parsed_records": limits["parsed_records"] - len(result["records"]),
                             "record_payload_bytes": limits["record_payload_bytes"] - payload_bytes + 2}
         args = [sys.executable, "-m", "cds.content_parser", "browser-history", str(copy), json.dumps(candidate_limits)]
+        if sidecars:
+            args.append("--journal-aware")
         code, output, error = _capture(args, min(settings["tool_timeout"], remaining),
                                        candidate_limits["record_payload_bytes"] + config.TOOL_STDERR_BYTES)
         if code:
@@ -213,6 +244,11 @@ def _parse_image_candidate(path, job, item, step, result, settings, work_dir,
         parsed = json.loads(output)
         if time.monotonic() >= candidate_deadline:
             raise ToolLimitError(timeout_reason, "Browser candidate time budget reached; parser output was not saved.")
+        if sidecars and parsed["status"] in ("complete", "partial"):
+            step["sidecar_status"] = "included"
+            step["sidecar_scope"] = parsed["scope"]
+            for provenance in step["sidecars"]:
+                provenance["included"] = True
     return parsed
 
 
@@ -304,9 +340,9 @@ def inspect_image(path, job, result, settings, work_dir):
     coverage["limits"].update({**limits, **IMAGE_CONTENT_LIMITS})
     coverage["scope"] = ("Source hash, partition discovery, filesystem directory entries, and browser visits from "
                          "allocated profile candidates in that inventory. Other file contents, unallocated space, "
-                         "and unmatched paths are not examined. " + SNAPSHOT_SCOPE)
-    result["warnings"].append(SNAPSHOT_SCOPE)
-    history = coverage_tools.step("image-browser-history", "Image browser candidates", "browser-history/1", unit="candidates")
+                         "and unmatched paths are not examined. ")
+    history = coverage_tools.step("image-browser-history", "Image browser candidates", "browser-history/1",
+                                  unit="candidates", extraction_bytes_reserved=0)
     coverage["steps"].append(history)
     # Paths only nominate candidates; the existing readers decide which schema, if any, is present.
     profile = re.compile(
@@ -315,29 +351,45 @@ def inspect_image(path, job, result, settings, work_dir):
         r"/[^/]+/History$|"
         r"/(?:AppData/Roaming/Mozilla/Firefox/Profiles|Library/Application Support/Firefox/Profiles|"
         r"\.mozilla/firefox)/[^/]+/places\.sqlite$", re.IGNORECASE)
+    allocated_files = {}
+    for item in result["artifacts"]:
+        if item["kind"] == "file" and not item["deleted"]:
+            allocated_files.setdefault((item["partition_offset"], item["path"]), []).append(item)
     candidates = []
     for item in result["artifacts"]:
         if item["kind"] != "file" or item["deleted"] or not profile.search(item["path"]):
             continue
-        # Include the full path so hard links and equal metadata addresses in different partitions cannot collide.
-        identity = json.dumps([item["partition_offset"], item["metadata_address"], item["path"]])
-        item["key"] = "image:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        # Exact full paths and partitions prevent adopting another profile's journal. Do not case-fold paths.
+        sidecars = [part for suffix in ("-wal", "-shm")
+                    for part in allocated_files.get((item["partition_offset"], item["path"] + suffix), [])]
+        for part in [item, *sidecars]:
+            # Include the full path so hard links and equal metadata addresses in different partitions cannot collide.
+            identity = json.dumps([part["partition_offset"], part["metadata_address"], part["path"]])
+            part["key"] = "image:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
         step = coverage_tools.step(item["key"], item["path"], "browser-history/1",
                                    artifact_key=item["key"], partition_offset=item["partition_offset"],
-                                   metadata_address=item["metadata_address"], extracted=False)
+                                   metadata_address=item["metadata_address"], extracted=False,
+                                   sidecar_status="unusable" if sidecars else "absent",
+                                   sidecar_scope=SIDECAR_GAP_SCOPE if sidecars else (
+                                       "No allocated WAL/SHM sidecars were present in the available inventory; base database only. "
+                                       + SNAPSHOT_SCOPE),
+                                   sidecars=[{"artifact_key": part["key"], "path": part["path"],
+                                              "partition_offset": part["partition_offset"],
+                                              "metadata_address": part["metadata_address"],
+                                              "extracted": False, "included": False} for part in sidecars])
         coverage["steps"].append(step)
-        candidates.append((item, step))
+        candidates.append((item, step, sidecars))
     inventory_complete = discovery["status"] == "complete" and all(item["status"] == "complete" for item in inventories)
     coverage_tools.mark(history, "running", "parsing", "Checking allocated browser profile candidates from the inventory.",
                         total=len(candidates), candidates_found=len(candidates))
     attempted = 0
     payload_bytes = 2  # Match the saved-run array accounting in Store.finish, including remapped artifact keys.
     payload_stopped = False
-    for item, step in candidates:
+    for item, step, sidecars in candidates:
         skip = _image_candidate_skip_reason(item, deadline, attempted, len(result["records"]), payload_stopped)
         if skip:
             reason, detail = skip
-            coverage_tools.mark(step, "skipped", reason, detail)
+            coverage_tools.mark(step, "skipped", reason, detail + " " + step["sidecar_scope"])
             continue
         attempted += 1
         # The existing 90-second content allowance covers extraction AND parsing for each candidate.
@@ -346,37 +398,51 @@ def inspect_image(path, job, result, settings, work_dir):
         coverage_tools.mark(step, "running", "extracting", "Extracting an allocated browser candidate.")
         report(work_dir, f"Reading browser candidate {attempted}/{len(candidates)}", 90)
         try:
-            parsed = _parse_image_candidate(path, job, item, step, result, settings, work_dir,
+            parsed = _parse_image_candidate(path, job, item, step, sidecars, result, settings, work_dir,
                                             candidate_deadline, timeout_reason, payload_bytes)
+            parser_status = parsed["status"]
             step["parser"] = item["details"]["content"]["parser"] = parsed["parser"]
             saved = 0
             for record in parsed.pop("records"):
                 if time.monotonic() >= candidate_deadline:
                     parsed.update(status="partial", reason=timeout_reason,
-                                  detail=f"Saved {saved} of {parsed['total']} visits; browser candidate time budget reached. " + SNAPSHOT_SCOPE)
+                                  detail=f"Saved {saved} of {parsed['total']} visits; browser candidate time budget reached.")
                     break
                 record["artifact_key"] = item["key"]
                 size = len(json.dumps(record, ensure_ascii=True).encode("utf-8")) + 2
                 # Inner keys are longer than "source"; recheck bytes after linking to keep the store's run bound exact.
                 if payload_bytes + size > limits["record_payload_bytes"]:
                     parsed.update(status="partial", reason="record_payload_limit",
-                                  detail=f"Saved {saved} of {parsed['total']} visits; image record payload budget reached. " + SNAPSHOT_SCOPE)
+                                  detail=f"Saved {saved} of {parsed['total']} visits; image record payload budget reached.")
                     break
                 result["records"].append(record)
                 payload_bytes += size
                 saved += 1
             payload_stopped = parsed["reason"] == "record_payload_limit"
-            coverage_tools.mark(step, parsed["status"], parsed["reason"], parsed["detail"],
+            detail = parsed["detail"].replace(SNAPSHOT_SCOPE, "").rstrip()
+            if step["sidecar_scope"] not in detail:
+                detail += " " + step["sidecar_scope"]
+            status = parsed["status"] if parser_status in ("complete", "partial") else parser_status
+            if status not in coverage_tools.FINAL_STATUSES:
+                detail += f" Unexpected parser status {status!r}; recorded as unknown."
+                status = "unknown"
+            coverage_tools.mark(step, status, parsed["reason"], detail,
                                 processed=saved, total=parsed["total"])
         except Exception as error:
             # A bad candidate must not discard the inventory or prevent other candidates from being read.
             reason = getattr(error, "reason", "content_parser_error")
             if reason == "tool_timeout" and time.monotonic() >= candidate_deadline:
                 reason = timeout_reason
-            coverage_tools.mark(step, "failed", reason, str(error)[:600])
+            if sidecars:
+                step.update(sidecar_status="unusable", sidecar_scope=SIDECAR_GAP_SCOPE)
+                for provenance in step["sidecars"]:
+                    provenance["included"] = False
+            coverage_tools.mark(step, "failed", reason, str(error)[:600] + (" " + step["sidecar_scope"] if sidecars else ""))
     counts = {"extracted": 0, "parsed": 0, "budget_stops": 0}
+    sidecar_counts = {"sidecars_included": 0, "sidecars_absent": 0, "sidecars_unusable": 0}
     status_counts = {"skipped": 0, "failed": 0, "unsupported": 0}
-    for _, step in candidates:
+    for _, step, _ in candidates:
+        sidecar_counts["sidecars_" + step["sidecar_status"]] += 1
         counts["extracted"] += step["extracted"]
         if step["status"] in {"complete", "partial"}:
             counts["parsed"] += 1
@@ -386,16 +452,25 @@ def inspect_image(path, job, result, settings, work_dir):
         if step["reason"].endswith(("_limit", "_timeout")):
             counts["budget_stops"] += 1
     status_detail = ", ".join(f"{count} {status}" for status, count in status_counts.items())
+    journal_detail = (f"Sidecar coverage by candidate: {sidecar_counts['sidecars_included']} included, "
+                      f"{sidecar_counts['sidecars_absent']} with no sidecars in the available inventory, "
+                      f"{sidecar_counts['sidecars_unusable']} with sidecars present but an unusable or unexamined working set. ")
+    coverage["scope"] += journal_detail
+    if not any(sidecars for _, _, sidecars in candidates):
+        coverage["scope"] += SNAPSHOT_SCOPE
+        result["warnings"].append(SNAPSHOT_SCOPE)
     detail = (f"Found {len(candidates)} allocated profile candidates in the available inventory: "
               f"{counts['extracted']} extracted, {counts['parsed']} parsed, {status_detail}; "
               f"{counts['budget_stops']} budget stops. "
-              + ("Inventory or partition discovery was incomplete; additional candidates may be missing. " if not inventory_complete else "")
-              + "Only matching paths in the inventory were considered; this does not establish complete browser activity. " + SNAPSHOT_SCOPE)
-    complete = inventory_complete and all(step["status"] == "complete" for _, step in candidates)
+              + ("Inventory or partition discovery was incomplete; additional candidates may be missing. "
+                 "Sidecars may also be missing from the available inventory. " if not inventory_complete else "")
+              + "Only matching paths in the inventory were considered; this does not establish complete browser activity. " + journal_detail)
+    complete = inventory_complete and all(step["status"] == "complete" for _, step, _ in candidates)
+    candidate_errors = any(status_counts.get(status, 0) for status in ("failed", "unsupported", "unknown"))
     coverage_tools.mark(history, "complete" if complete else "partial",
                         "inventory_incomplete" if not inventory_complete else "content_budget" if counts["budget_stops"]
-                        else "candidates_examined" if complete else "candidate_errors",
-                        detail, processed=counts["parsed"], **counts, **status_counts)
+                        else "candidate_errors" if candidate_errors else "candidates_examined" if complete else "candidates_partial",
+                        detail, processed=counts["parsed"], **counts, **status_counts, **sidecar_counts)
     if not complete:
         result["warnings"].append(detail)
 

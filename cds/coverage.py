@@ -5,6 +5,8 @@ from uuid import uuid4
 
 import cds.config as config
 
+FINAL_STATUSES = ("complete", "partial", "unsupported", "failed", "skipped", "unknown")
+
 
 def timestamp():
     return datetime.now(timezone.utc).isoformat()

@@ -3,6 +3,8 @@ import json
 import shutil
 import sqlite3
 import struct
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -300,7 +302,7 @@ def test_unexpected_candidate_error_preserves_other_saved_records(tmp_path, hist
     assert source.read_bytes() == b"synthetic inventory" and not list(work.glob("content-*"))
 
 
-@pytest.mark.parametrize("status", ["unknown", "running"])
+@pytest.mark.parametrize("status", ["unknown", "running", "unexpected", None, ["complete"]])
 def test_unexpected_candidate_status_is_counted_without_claiming_success(tmp_path, monkeypatch, status):
     listing = f"0|{CHROME}|10|r/rrw-rw-rw-|0|0|4|0|0|0|0\n"
     fake_image_tools(monkeypatch, {2048: (0, listing, "")})
@@ -310,11 +312,82 @@ def test_unexpected_candidate_status_is_counted_without_claiming_success(tmp_pat
         0, b"data" if args[0] == "icat" else json.dumps(parsed).encode(), ""))
     result = analyze_image(tmp_path, b"synthetic inventory")
     assert result["coverage"]["status"] == summary(result)["status"] == "partial"
-    assert summary(result)[status] == 1 and summary(result)["parsed"] == 0
-    assert f"1 {status}" in summary(result)["detail"]
+    assert summary(result)["unknown"] == 1 and summary(result)["parsed"] == 0
+    assert summary(result)["reason"] == "candidate_errors"
+    assert "1 unknown" in summary(result)["detail"]
     assert summary(result)["detail"] in result["warnings"]
     candidate = next(step for step in result["coverage"]["steps"] if step["label"] == CHROME)
-    assert candidate["status"] == ("failed" if status == "running" else status)
+    assert candidate["status"] == "unknown"
+    assert "Candidate did not finish." in candidate["detail"]
+    if status != "unknown":
+        assert f"Unexpected parser status {status!r}; recorded as unknown." in candidate["detail"]
+
+
+@pytest.mark.parametrize("issue,status,reason,note", [
+    ("none", "complete", "candidates_examined", ""),
+    ("truncated", "partial", "candidates_partial", "shortened fields"),
+    ("utf8", "partial", "candidates_partial", "Invalid UTF-8"),
+    ("unreadable", "failed", "candidate_errors", "could not be read"),
+    ("unsupported", "unsupported", "candidate_errors", "supported browser history schema"),
+])
+def test_candidate_summary_distinguishes_quality_notes_from_errors(tmp_path, monkeypatch, issue, status, reason, note):
+    path = make_chrome_history(tmp_path / "History")
+    with sqlite3.connect(path) as db:
+        if issue == "truncated":
+            db.execute("UPDATE urls SET title=? WHERE id=1", ("a" * (CONTENT_LIMITS["record_text_chars"] + 1),))
+        elif issue == "utf8":
+            db.execute("UPDATE urls SET url=CAST(x'68747470733a2fff' AS TEXT) WHERE id=2")
+        elif issue == "unsupported":
+            db.execute("DROP TABLE visits")
+    data = b"not a database" if issue == "unreadable" else path.read_bytes()
+    listing = f"0|{CHROME}|10|r/rrw-rw-rw-|0|0|{len(data)}|0|0|0|0\n"
+    fake_image_tools(monkeypatch, {2048: (0, listing, "")})
+    monkeypatch.setattr(analysis, "_icat", lambda *_: data)
+    result = analyze_image(tmp_path, b"synthetic inventory")
+    candidate = next(step for step in result["coverage"]["steps"] if step["label"] == CHROME)
+    assert candidate["status"] == status and note in candidate["detail"]
+    assert summary(result)["reason"] == reason
+    assert summary(result)["status"] == ("complete" if status == "complete" else "partial")
+    assert summary(result)["parsed"] == (1 if status in {"complete", "partial"} else 0)
+    assert len(result["records"]) == (3 if status in {"complete", "partial"} else 0)
+
+
+@pytest.mark.parametrize("suffix", ["", "-wal"])
+def test_size_mismatch_saves_extracted_content_with_null_parser(tmp_path, monkeypatch, suffix):
+    listing = f"0|{CHROME}|10|r/rrw-rw-rw-|0|0|{4 if suffix else 5}|0|0|0|0\n"
+    if suffix:
+        listing += f"0|{CHROME}{suffix}|11|r/rrw-rw-rw-|0|0|5|0|0|0|0\n"
+    fake_image_tools(monkeypatch, {2048: (0, listing, "")})
+    monkeypatch.setattr(analysis, "_icat", lambda *_: b"data")
+
+    def unexpected_parser(*_):
+        pytest.fail("A size-mismatched working set must not reach the parser.")
+
+    monkeypatch.setattr(analysis, "_capture", unexpected_parser)
+    store = Store(tmp_path / "workspace")
+    store.initialize()
+    case = store.create_case("Size mismatch", "")
+    source = store.root / "evidence" / "image"
+    source.write_bytes(b"synthetic inventory")
+    store.register("image", case["id"], "browser.img", source.stat().st_size, source, "raw_image", 512)
+    job = store.claim(LIMITS, analysis.PARSER_VERSION)
+    work = store.root / "work" / job["run_id"]
+    work.mkdir()
+    result = analysis.analyze(job, LIMITS, str(work))
+    assert "error" not in result and store.finish(job, result)
+    candidate = next(step for step in store.detail("image")["coverage"]["steps"] if step["label"] == CHROME)
+    assert candidate["status"] == "failed" and candidate["extracted"]
+    assert "extracted byte count differs" in candidate["detail"]
+    artifacts = store.artifacts("image", "", 0, 100)["items"]
+    for artifact in artifacts:
+        if artifact["path"].startswith(CHROME):
+            content = artifact["details"]["content"]
+            assert content["parser"] is None and content["size_bytes"] == 4
+            assert content["sha256"] == hashlib.sha256(b"data").hexdigest()
+            assert content["evidence_id"] == "image" and content["run_id"] == job["run_id"]
+    if suffix:
+        assert candidate["sidecars"][0]["extracted"] and not candidate["sidecars"][0]["included"]
+    assert source.read_bytes() == b"synthetic inventory" and not list(work.glob("content-*"))
 
 
 def test_candidate_extraction_failure_uses_content_wording(tmp_path, monkeypatch):
@@ -388,3 +461,308 @@ def test_restart_removes_interrupted_content_copies_only(tmp_path):
     assert not list(work.glob("content-*"))
     assert (work / "progress.json").is_file() and source.read_bytes() == b"original"
     assert store.detail("source")["status"] == "queued"
+
+
+@pytest.fixture
+def journal_files(tmp_path):
+    files = {}
+    for profile, name, make_history, statement in (
+        (CHROME, "wal-History", make_chrome_history,
+         "INSERT INTO visits(id,url,visit_time) VALUES(2,1,13344473660123456)"),
+        (FIREFOX, "wal-places.sqlite", make_firefox_history,
+         "INSERT INTO moz_historyvisits(id,place_id,visit_date) VALUES(2,1,1700000060123456)"),
+    ):
+        path = make_history(tmp_path / name, count=1, optional=False)
+        # A normal close checkpoints away the condition this fixture must reproduce.
+        subprocess.run([sys.executable, "-c", """
+import os, sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA journal_mode=WAL')
+db.execute('PRAGMA wal_autocheckpoint=0')
+db.execute(sys.argv[2])
+db.commit()
+os._exit(0)
+""", str(path), statement], check=True, timeout=5)
+        for suffix in ("", "-wal", "-shm"):
+            files[profile + suffix] = path.with_name(path.name + suffix).read_bytes()
+        assert len(files[profile + "-wal"]) > 32
+    return files
+
+
+@TSK
+@pytest.mark.parametrize("suffixes", [("-wal", "-shm"), ("-wal",), ()])
+def test_unclean_wal_visits_and_sidecar_provenance_are_saved(tmp_path, journal_files, monkeypatch, suffixes):
+    files = {profile + suffix: journal_files[profile + suffix]
+             for profile in (CHROME, FIREFOX) for suffix in ("", *suffixes)}
+    image = browser_image(files)
+    store = Store(tmp_path / "workspace")
+    store.initialize()
+    case = store.create_case("WAL image", "")
+    source = store.root / "evidence" / "image"
+    source.write_bytes(image)
+    store.register("image", case["id"], "browser.img", len(image), source, "raw_image", 512)
+    job = store.claim(LIMITS, analysis.PARSER_VERSION)
+    work = store.root / "work" / job["run_id"]
+    work.mkdir()
+    capture = analysis._capture
+    working_sets = []
+
+    def inspect_working_set(args, timeout, max_bytes):
+        if "cds.content_parser" not in args:
+            return capture(args, timeout, max_bytes)
+        copy = Path(args[4])
+        assert copy.parent.parent == work
+        assert sorted(part.name for part in copy.parent.iterdir()) == sorted("history.sqlite" + suffix for suffix in ("", *suffixes))
+        assert ("--journal-aware" in args) == bool(suffixes)
+        working_sets.append(copy.parent)
+        result = capture(args, timeout, max_bytes)
+        if suffixes == ("-wal",):
+            # SQLite really writes here; this must be confined to the disposable run directory.
+            assert copy.with_name("history.sqlite-shm").stat().st_size > 0
+        return result
+
+    monkeypatch.setattr(analysis, "_capture", inspect_working_set)
+    result = analysis.analyze(job, LIMITS, str(work))
+    assert "error" not in result and store.finish(job, result)
+    records = store.records("image", "", 0, 100)["items"]
+    assert len(records) == (4 if suffixes else 2)
+    assert {record["source_key"] for record in records} == ({"1", "2"} if suffixes else {"1"})
+    assert {record["at"] for record in records} == (
+        {"2023-11-14T22:13:20.123456+00:00", "2023-11-14T22:14:20.123456+00:00"} if suffixes
+        else {"2023-11-14T22:13:20.123456+00:00"})
+    steps = {step["label"]: step for step in store.detail("image")["coverage"]["steps"]}
+    artifacts = store.artifacts("image", "", 0, 200)["items"]
+    by_path = {artifact["path"]: artifact for artifact in artifacts}
+    for profile in (CHROME, FIREFOX):
+        step = steps[profile]
+        assert step["sidecar_status"] == ("included" if suffixes else "absent")
+        assert len(step["sidecars"]) == len(suffixes)
+        for sidecar in step["sidecars"]:
+            artifact = by_path[sidecar["path"]]
+            content = artifact["details"]["content"]
+            assert artifact["id"] != by_path[profile]["id"]
+            assert sidecar["artifact_key"] == content["artifact_key"] != step["artifact_key"]
+            assert content["sha256"] == sidecar["sha256"] == hashlib.sha256(files[sidecar["path"]]).hexdigest()
+            assert content["size_bytes"] == sidecar["size_bytes"] == len(files[sidecar["path"]])
+            assert content["run_id"] == job["run_id"] and content["evidence_id"] == "image"
+            assert content["parser_version"] == analysis.PARSER_VERSION
+            assert sidecar["included"] and sidecar["extracted"]
+            assert sidecar["partition_offset"] == artifact["partition_offset"] == 2048
+            assert sidecar["metadata_address"] == artifact["metadata_address"]
+        assert by_path[profile]["details"]["content"]["sidecars"] == step["sidecars"]
+        if suffixes:
+            assert "committed WAL" in step["detail"] and SNAPSHOT_SCOPE not in step["detail"]
+        else:
+            assert "No allocated WAL/SHM sidecars" in step["detail"] and "base database only" in step["detail"]
+    assert summary(result)["sidecars_included" if suffixes else "sidecars_absent"] == 2
+    assert summary(result)["sidecars_unusable"] == 0 and result["coverage"]["status"] == "complete"
+    assert (SNAPSHOT_SCOPE in result["coverage"]["scope"]) == (not suffixes)
+    assert source.read_bytes() == image
+    assert result["sha256"] == store.detail("image")["sha256"] == hashlib.sha256(image).hexdigest()
+    assert len(working_sets) == 2 and all(not directory.exists() for directory in working_sets)
+    assert not list(work.glob("content-*"))
+
+
+@TSK
+@pytest.mark.parametrize("failure", ["extraction", "short_read", "parser", "wal_header", "wal_checksum", "wal_frame", "truncated_wal", "shm"])
+def test_present_unusable_sidecars_are_gaps_and_leave_no_copies(tmp_path, journal_files, monkeypatch, failure):
+    files = dict(journal_files)
+    if failure == "truncated_wal":
+        files[CHROME + "-wal"] = files[CHROME + "-wal"][:-1]
+    if failure in {"wal_header", "wal_checksum", "wal_frame", "shm"}:
+        suffix = "-shm" if failure == "shm" else "-wal"
+        damaged = bytearray(files[CHROME + suffix])
+        offset = {"wal_header": 0, "wal_checksum": 24, "wal_frame": -1, "shm": 40}[failure]
+        damaged[offset] ^= 255
+        files[CHROME + suffix] = bytes(damaged)
+    icat = analysis._icat
+    capture = analysis._capture
+
+    def fail_sidecar(path, sector, artifact, timeout, max_bytes):
+        if artifact["path"] == CHROME + "-shm":
+            if failure == "extraction":
+                raise subprocess.CalledProcessError(1, ["icat"], stderr="Synthetic sidecar extraction failure")
+            if failure == "short_read":
+                return files[CHROME + "-shm"][:-1]
+        return icat(path, sector, artifact, timeout, max_bytes)
+
+    def fail_parser(args, timeout, max_bytes):
+        if failure == "parser" and "cds.content_parser" in args:
+            copy = Path(args[4])
+            assert copy.with_name("history.sqlite-wal").is_file() and copy.with_name("history.sqlite-shm").is_file()
+            if copy.read_bytes() == files[CHROME]:
+                raise ValueError("Synthetic working-set parser failure")
+        return capture(args, timeout, max_bytes)
+
+    monkeypatch.setattr(analysis, "_icat", fail_sidecar)
+    monkeypatch.setattr(analysis, "_capture", fail_parser)
+    result = analyze_image(tmp_path, browser_image(files))
+    candidate = next(step for step in result["coverage"]["steps"] if step["label"] == CHROME)
+    assert candidate["status"] == "failed" and candidate["sidecar_status"] == "unusable"
+    assert "journal coverage has a gap" in candidate["detail"]
+    assert "No allocated WAL/SHM sidecars" not in candidate["detail"] and SNAPSHOT_SCOPE not in candidate["detail"]
+    assert len(candidate["sidecars"]) == 2 and all(not entry["included"] for entry in candidate["sidecars"])
+    assert summary(result)["sidecars_unusable"] == summary(result)["sidecars_included"] == 1
+    assert summary(result)["sidecars_absent"] == 0 and result["coverage"]["status"] == "partial"
+    assert len(result["records"]) == 2 and all(record["parser"] == "firefox-history/1" for record in result["records"])
+    assert summary(result)["detail"] in result["warnings"]
+
+
+@TSK
+@pytest.mark.parametrize("scope", ["candidate", "image"])
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_sidecars_share_candidate_and_image_byte_budgets(tmp_path, journal_files, monkeypatch, scope, suffix):
+    files = {path: data for path, data in journal_files.items() if path.startswith(CHROME)}
+    required = len(files[CHROME]) + len(files[CHROME + "-wal"])
+    if suffix == "-shm":
+        required += len(files[CHROME + "-shm"])
+    limits = CONTENT_LIMITS if scope == "candidate" else analysis.IMAGE_CONTENT_LIMITS
+    monkeypatch.setitem(limits, "content_file_bytes" if scope == "candidate" else "image_content_bytes", required - 1)
+    result = analyze_image(tmp_path, browser_image(files))
+    step = next(step for step in result["coverage"]["steps"] if step["label"] == CHROME)
+    assert step["sidecar_status"] == "unusable" and step["reason"] == ("content_file_limit" if scope == "candidate" else "image_content_limit")
+    assert CHROME + suffix in step["detail"] and "gap" in step["detail"]
+    assert not result["records"] and summary(result)["budget_stops"] == 1
+    assert summary(result)["extraction_bytes_reserved"] < required
+
+
+@TSK
+def test_image_byte_budget_includes_previous_working_sets(tmp_path, journal_files, monkeypatch):
+    chrome_bytes = sum(len(data) for path, data in journal_files.items() if path.startswith(CHROME))
+    monkeypatch.setitem(analysis.IMAGE_CONTENT_LIMITS, "image_content_bytes", chrome_bytes + len(journal_files[FIREFOX]))
+    result = analyze_image(tmp_path, browser_image(journal_files))
+    assert summary(result)["sidecars_included"] == summary(result)["sidecars_unusable"] == 1
+    assert summary(result)["budget_stops"] == 1 and len(result["records"]) == 2
+    assert all(record["parser"] == "chrome-history/1" for record in result["records"])
+
+
+@TSK
+@pytest.mark.parametrize("location", ["directory", "partition"])
+def test_wal_is_never_adopted_from_another_directory_or_partition(tmp_path, journal_files, location):
+    files = {CHROME: journal_files[CHROME]}
+    if location == "directory":
+        files[CHROME.replace("Default", "Other Profile") + "-wal"] = journal_files[CHROME + "-wal"]
+        image = browser_image(files)
+    else:
+        image = bytearray(browser_image(files, partitions=2))
+        other = browser_image({CHROME + "-wal": journal_files[CHROME + "-wal"]})
+        image[4928 * 512:] = other[2048 * 512:]
+        image = bytes(image)
+    result = analyze_image(tmp_path, image)
+    assert len(result["records"]) == 1 and result["records"][0]["source_key"] == "1"
+    assert summary(result)["sidecars_absent"] == 1 and summary(result)["sidecars_included"] == 0
+    assert all("content" not in item["details"] for item in result["artifacts"] if item["path"].endswith("-wal"))
+
+
+@pytest.mark.parametrize("entry", ["deleted", "directory", "case", "ambiguous"])
+def test_only_unambiguous_allocated_exact_sidecar_paths_are_used(tmp_path, journal_files, monkeypatch, entry):
+    main = journal_files[CHROME]
+    wal = journal_files[CHROME + "-wal"]
+    path = CHROME + "-wal"
+    if entry == "deleted":
+        path += " (deleted)"
+    elif entry == "case":
+        path = path.replace("Default", "default")
+    mode = "d/drwxrwxrwx" if entry == "directory" else "r/rrw-rw-rw-"
+    listing = (f"0|{CHROME}|10|r/rrw-rw-rw-|0|0|{len(main)}|0|0|0|0\n"
+               f"0|{path}|11|{mode}|0|0|{len(wal)}|0|0|0|0\n")
+    if entry == "ambiguous":
+        listing += f"0|{path}|12|{mode}|0|0|{len(wal)}|0|0|0|0\n"
+    fake_image_tools(monkeypatch, {2048: (0, listing, "")})
+
+    def main_only(path, sector, artifact, timeout, max_bytes):
+        assert artifact["path"] == CHROME
+        return main
+
+    monkeypatch.setattr(analysis, "_icat", main_only)
+    result = analyze_image(tmp_path, b"synthetic inventory")
+    assert summary(result)["sidecars_unusable" if entry == "ambiguous" else "sidecars_absent"] == 1
+    assert len(result["records"]) == (0 if entry == "ambiguous" else 1)
+
+
+def test_restart_removes_entire_interrupted_journal_working_set(tmp_path):
+    store = Store(tmp_path / "workspace")
+    store.initialize()
+    case = store.create_case("Interrupted journals", "")
+    source = store.root / "evidence" / "source"
+    source.write_bytes(b"original image")
+    store.register("source", case["id"], "disk.img", source.stat().st_size, source, "raw_image", 512)
+    job = store.claim()
+    work = store.root / "work" / job["run_id"]
+    temporary = work / "content-interrupted"
+    temporary.mkdir(parents=True)
+    for suffix in ("", "-wal", "-shm"):
+        (temporary / ("history.sqlite" + suffix)).write_bytes(b"disposable")
+    (work / "progress.json").write_text("{}")
+    store.recover_interrupted()
+    assert not list(work.glob("content-*")) and (work / "progress.json").is_file()
+    assert source.read_bytes() == b"original image" and store.detail("source")["status"] == "queued"
+
+
+@TSK
+@pytest.mark.parametrize("scope", ["candidate", "image"])
+def test_sidecar_extraction_shares_the_parser_deadline(tmp_path, journal_files, monkeypatch, scope):
+    icat = analysis._icat
+    monotonic = analysis.time.monotonic
+    elapsed = 0
+    if scope == "image":
+        monkeypatch.setitem(analysis.IMAGE_CONTENT_LIMITS, "image_content_timeout", CONTENT_LIMITS["content_timeout"] // 2)
+    monkeypatch.setattr(analysis.time, "monotonic", lambda: monotonic() + elapsed)
+
+    def exhaust(path, sector, artifact, timeout, max_bytes):
+        nonlocal elapsed
+        data = icat(path, sector, artifact, timeout, max_bytes)
+        if artifact["path"].endswith("-wal"):
+            elapsed += (CONTENT_LIMITS["content_timeout"] if scope == "candidate"
+                        else analysis.IMAGE_CONTENT_LIMITS["image_content_timeout"]) + 1
+        return data
+
+    monkeypatch.setattr(analysis, "_icat", exhaust)
+    result = analyze_image(tmp_path, browser_image(journal_files))
+    assert not result["records"] and summary(result)["budget_stops"] == 2
+    assert summary(result)["sidecars_unusable"] == 2 and summary(result)["sidecars_absent"] == 0
+    step = next(step for step in result["coverage"]["steps"] if step["label"] == CHROME)
+    assert step["reason"] == ("content_timeout" if scope == "candidate" else "image_content_timeout")
+    assert "gap" in step["detail"] and CHROME + "-shm" in step["detail"]
+
+
+@TSK
+def test_truncated_inventory_does_not_claim_journals_are_absent_from_image(tmp_path, journal_files):
+    image = browser_image(journal_files)
+    full = analyze_image(tmp_path, image)
+    limit = next(index + 1 for index, item in enumerate(full["artifacts"]) if item["path"] == CHROME)
+    result = analyze_image(tmp_path, image, max_artifacts=limit)
+    assert summary(result)["status"] == "partial" and summary(result)["reason"] == "inventory_incomplete"
+    assert summary(result)["sidecars_absent"] == 1
+    assert "Sidecars may also be missing from the available inventory" in summary(result)["detail"]
+    assert len(result["records"]) == 1 and result["records"][0]["source_key"] == "1"
+
+
+def test_unclean_upload_still_ignores_sidecars_without_mutating_them(tmp_path, journal_files):
+    path = tmp_path / "upload.sqlite"
+    before = {}
+    for suffix in ("", "-wal", "-shm"):
+        part = path.with_name(path.name + suffix)
+        before[part] = journal_files[CHROME + suffix]
+        part.write_bytes(before[part])
+    work = tmp_path / "work"
+    work.mkdir()
+    job = {"id": "upload", "name": path.name, "source_path": str(path), "size": path.stat().st_size,
+           "kind": "file", "imported_at": "2026-01-01T00:00:00Z"}
+    result = analysis.analyze(job, LIMITS, str(work))
+    assert "error" not in result and len(result["records"]) == 1
+    assert result["records"][0]["source_key"] == "1"
+    assert SNAPSHOT_SCOPE in result["coverage"]["scope"] and SNAPSHOT_SCOPE in result["warnings"]
+    assert all(part.read_bytes() == data for part, data in before.items())
+    assert not list(work.glob("content-*"))
+
+
+@TSK
+def test_shm_without_wal_is_included_but_reports_base_database_only(tmp_path, journal_files):
+    files = {CHROME: journal_files[CHROME], CHROME + "-shm": journal_files[CHROME + "-shm"]}
+    result = analyze_image(tmp_path, browser_image(files))
+    step = next(step for step in result["coverage"]["steps"] if step["label"] == CHROME)
+    assert step["sidecar_status"] == "included" and step["sidecars"][0]["included"]
+    assert "No WAL was present; base database only" in step["detail"]
+    assert len(result["records"]) == 1 and result["records"][0]["source_key"] == "1"
+    assert summary(result)["sidecars_included"] == 1 and summary(result)["sidecars_absent"] == 0
