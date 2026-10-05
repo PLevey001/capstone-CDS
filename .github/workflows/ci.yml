@@ -4,11 +4,16 @@ jobs:
   image-tests:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # The README advertises 3.11 or newer. Test that floor, not only CI's version.
+        python-version: ['3.11', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.13'
+          python-version: ${{ matrix.python-version }}
       - run: sudo apt-get update && sudo apt-get install -y sleuthkit e2fsprogs ntfs-3g build-essential
       - run: python -m pip install -r requirements-dev.txt
       - name: Record filesystem tool versions
