@@ -208,12 +208,12 @@ def test_composite_keys_cannot_multiply_visits(history, table):
 
 
 def test_changed_source_is_not_paired_with_the_pre_copy_hash(history, tmp_path, monkeypatch):
-    inspect = analysis.inspect_history
+    inspect = analysis.inspect_records
     def change_source(path, result, settings, work_dir):
         with sqlite3.connect(path) as db:
             db.execute("UPDATE urls SET title='Changed' WHERE id=1")
         inspect(path, result, settings, work_dir)
-    monkeypatch.setattr(analysis, 'inspect_history', change_source)
+    monkeypatch.setattr(analysis, 'inspect_records', change_source)
     result = analyze_file(history, tmp_path / 'work')
     assert not result['records']
     assert result['coverage']['status'] == 'partial'

@@ -467,7 +467,9 @@ class Store:
                         found = True
                         events.append({"id": f"{source['id']}:{run_id}:record:{row['id']}", "run_id": run_id,
                             "record_id": row["id"], "at": datetime.fromisoformat(timestamps.from_microseconds(row["event_time_us"])),
-                            "timestamp_kind": row["kind"], "timestamp_label": "Browser visit", "origin": "record",
+                            "timestamp_kind": row["kind"],
+                            "timestamp_label": "Registry key last-write" if row["kind"] == "registry_key" else "Browser visit",
+                            "origin": "record",
                             "summary": row["summary"], "source_id": source["id"], "source_name": source["name"],
                             "artifact_id": row["artifact_id"], "artifact_path": row["path"],
                             "artifact_kind": row["artifact_kind"], "deleted": bool(row["deleted"])})

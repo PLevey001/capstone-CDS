@@ -7,6 +7,7 @@ from pathlib import Path
 import cds.chrome_history as chrome_history
 import cds.firefox_history as firefox_history
 import cds.history_records as history_records
+import cds.registry_records as registry_records
 
 
 def read_history(path, limits, parser="browser-history", *, journal_aware=False):
@@ -20,13 +21,14 @@ def read_history(path, limits, parser="browser-history", *, journal_aware=False)
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("parser", choices=["browser-history", "chrome-history", "firefox-history"])
+    parser.add_argument("parser", choices=["browser-history", "chrome-history", "firefox-history", "windows-registry"])
     parser.add_argument("path", type=Path)
     parser.add_argument("limits", type=json.loads)
     parser.add_argument("--journal-aware", action="store_true", help="Only for disposable in-image working sets")
     args = parser.parse_args()
-    print(json.dumps(read_history(args.path, args.limits, args.parser, journal_aware=args.journal_aware),
-                     ensure_ascii=True, allow_nan=False))
+    result = (registry_records.read_hive(args.path, args.limits) if args.parser == "windows-registry"
+              else read_history(args.path, args.limits, args.parser, journal_aware=args.journal_aware))
+    print(json.dumps(result, ensure_ascii=True, allow_nan=False))
 
 
 if __name__ == "__main__":

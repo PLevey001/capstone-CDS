@@ -130,7 +130,7 @@ def test_real_filesystem_browser_discovery_wal_and_saved_provenance(filesystem_i
         assert sidecar["artifact_key"] == artifact["details"]["content"]["artifact_key"]
     assert steps[FIREFOX]["sidecar_status"] == "absent"
     assert "base database only" in steps[FIREFOX]["detail"]
-    summary = next(step for step in result["coverage"]["steps"] if step["id"] == "image-browser-history")
+    summary = next(step for step in result["coverage"]["steps"] if step["id"] == "image-content")
     assert summary["candidates_found"] == summary["extracted"] == summary["parsed"] == 2
     assert summary["sidecars_included"] == summary["sidecars_absent"] == 1
     assert summary["sidecars_unusable"] == 0

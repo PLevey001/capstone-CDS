@@ -21,7 +21,7 @@ def pytest_sessionstart(session):
         raise pytest.UsageError("Required image tests cannot run; missing: " + ", ".join(missing))
 
 
-IMAGE_TEST_MODULES = ("test_filesystems.py", "test_image_history.py", "test_pipeline.py", "test_history.py")
+IMAGE_TEST_MODULES = ("test_filesystems.py", "test_image_history.py", "test_image_registry.py", "test_pipeline.py", "test_history.py")
 
 
 def pytest_sessionfinish(session, exitstatus):

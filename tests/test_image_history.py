@@ -127,7 +127,7 @@ def analyze_image(tmp_path, image, **limits):
 
 
 def summary(result):
-    return next(step for step in result["coverage"]["steps"] if step["id"] == "image-browser-history")
+    return next(step for step in result["coverage"]["steps"] if step["id"] == "image-content")
 
 
 @TSK
