@@ -6,7 +6,7 @@ import sqlite3
 import struct
 
 import cds.timestamps as timestamps
-from cds.records import record_size
+from cds.records import RecordBudget, preserve_large_integers
 
 SNAPSHOT_SCOPE = "Standalone database snapshot only. Separate WAL/journal files were not supplied or examined."
 JOURNAL_SCOPE = ("Matching WAL/SHM sidecars were included in a disposable working set. "
@@ -141,7 +141,7 @@ def read_history(path, limits, readers, *, journal_aware=False):
             issues = match["issues"]
             total = result["total"]
             text_limit = limits["record_text_chars"]
-            payload_bytes = 2  # Array brackets; each record also accounts for its separator.
+            budget = RecordBudget(limits["record_payload_bytes"])
             missing_urls = invalid_times = truncated_fields = nonfinite_fields = 0
             for event_time, details in match["rows"]:
                 if not isinstance(details["visit_id"], int):
@@ -149,10 +149,6 @@ def read_history(path, limits, readers, *, journal_aware=False):
                 source_key = str(details["visit_id"])
                 shortened = []
                 for name, value in list(details.items()):
-                    # Decimal text preserves integers that browser JSON numbers would round.
-                    if isinstance(value, int) and abs(value) > 2**53 - 1:
-                        details[name] = str(value)
-                        details.setdefault("integer_text_fields", []).append(name)
                     if isinstance(value, float) and not math.isfinite(value):
                         details[name] = str(value)
                         details.setdefault("nonfinite_fields", []).append(name)
@@ -163,6 +159,7 @@ def read_history(path, limits, readers, *, journal_aware=False):
                     if isinstance(value, str) and len(value) > text_limit:
                         details[name] = value[:text_limit]
                         shortened.append(name)
+                preserve_large_integers(details)
                 if shortened:
                     details["truncated_fields"] = shortened
                     truncated_fields += 1
@@ -179,13 +176,10 @@ def read_history(path, limits, readers, *, journal_aware=False):
                 record = {"artifact_key": "source", "kind": "browser_visit", "source_key": source_key,
                           "event_time_us": event_time, "summary": str(details["title"] or details["url"] or f"Visit {source_key}"),
                           "parser": result["parser"], "details": details}
-                size = record_size(record)
-                if payload_bytes + size > limits["record_payload_bytes"]:
+                if not budget.append(result["records"], record):
                     issues.append("Saved record payload reached its byte limit.")
                     result["reason"] = "record_payload_limit"
                     break
-                result["records"].append(record)
-                payload_bytes += size
             result["processed"] = len(result["records"])
             if result["processed"] < total and result["reason"] != "record_payload_limit":
                 issues.append("Saved records reached the record-count limit.")

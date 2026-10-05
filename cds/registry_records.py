@@ -5,7 +5,7 @@ import struct
 from Registry import RegistryParse
 
 import cds.timestamps as timestamps
-from cds.records import record_size
+from cds.records import RecordBudget, preserve_large_integers
 
 PARSER = "windows-registry/1"
 SCOPE = ("Ordinary hive keys and values only. Transaction logs were not examined or replayed; "
@@ -203,7 +203,7 @@ def read_hive(path, limits):
                 raise ValueError("Referenced hive cell is missing, free, or shorter than its declared data.")
             return memoryview(data)[offset:offset + length]
 
-        payload_bytes = 2  # Same array and separator accounting as browser records and Store.finish.
+        budget = RecordBudget(limits["record_payload_bytes"])
         shortened = missing_times = 0
         for record in hive_records(header, cell_data, limits["record_text_chars"]):
             if len(result["records"]) >= limits["parsed_records"]:
@@ -212,24 +212,19 @@ def read_hive(path, limits):
             details = record["details"]
             truncated = []
             for name, value in list(details.items()):
-                if isinstance(value, int) and abs(value) > 2**53 - 1:
-                    details[name] = str(value)
-                    details.setdefault("integer_text_fields", []).append(name)
                 # Data is already bounded above. Keep fixed provenance, links, and timestamp qualifications intact.
                 if name in ("key_path", "value_name") and len(value) > limits["record_text_chars"]:
                     details[name] = value[:limits["record_text_chars"]]
                     truncated.append(name)
+            preserve_large_integers(details)
             if len(record["summary"]) > limits["record_text_chars"]:
                 truncated.append("summary")
             if truncated:
                 details["truncated_fields"] = truncated
             record["summary"] = record["summary"][:limits["record_text_chars"]]
-            size = record_size(record)
-            if payload_bytes + size > limits["record_payload_bytes"]:
+            if not budget.append(result["records"], record):
                 result.update(status="partial", reason="record_payload_limit")
                 break
-            result["records"].append(record)
-            payload_bytes += size
             shortened += bool(truncated or details.get("data_truncated"))
             missing_times += record["kind"] == "registry_key" and record["event_time_us"] is None
         else:

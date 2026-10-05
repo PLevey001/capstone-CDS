@@ -13,7 +13,7 @@ import cds.artifacts as artifact_rules
 import cds.config as config
 import cds.timestamps as timestamps
 from cds.migrations import migrate_history, migrate_records
-from cds.records import record_size
+from cds.records import EMPTY_RECORD_PAYLOAD_BYTES, record_size
 
 logger = logging.getLogger(__name__)
 
@@ -428,6 +428,8 @@ class Store:
         """
         labels = {"accessed": "Accessed", "modified": "Modified",
                   "metadata_changed": "Metadata changed", "created": "Created"}
+        record_labels = {"browser_visit": "Browser visit", "registry_key": "Registry key last-write",
+                         "windows_event": "Event creation time"}
         with self.connect() as db:
             db.execute("BEGIN")
             case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
@@ -469,8 +471,7 @@ class Store:
                         events.append({"id": f"{source['id']}:{run_id}:record:{row['id']}", "run_id": run_id,
                             "record_id": row["id"], "at": datetime.fromisoformat(timestamps.from_microseconds(row["event_time_us"])),
                             "timestamp_kind": row["kind"],
-                            "timestamp_label": ("Registry key last-write" if row["kind"] == "registry_key"
-                                                else "Event creation time" if row["kind"] == "windows_event" else "Browser visit"),
+                            "timestamp_label": record_labels.get(row["kind"], f"Record timestamp ({row['kind']})"),
                             "origin": "record",
                             "summary": row["summary"], "source_id": source["id"], "source_name": source["name"],
                             "artifact_id": row["artifact_id"], "artifact_path": row["path"],
@@ -595,7 +596,7 @@ class Store:
             records = result.get("records", [])
             if len(records) > config.CONTENT_LIMITS["parsed_records"]:
                 raise ValueError("Parser returned too many records")
-            payload_bytes = 2
+            payload_bytes = EMPTY_RECORD_PAYLOAD_BYTES
             for record in records:
                 artifact_id = artifact_ids.get(record["artifact_key"])
                 if artifact_id is None:

@@ -20,7 +20,7 @@ import cds.config as config
 import cds.coverage as coverage_tools
 from cds.evtx_records import SCOPE as EVTX_SCOPE
 from cds.history_records import SIDECAR_GAP_SCOPE, SNAPSHOT_SCOPE
-from cds.records import record_size
+from cds.records import EMPTY_RECORD_PAYLOAD_BYTES, RecordBudget
 from cds.registry_records import SCOPE as REGISTRY_SCOPE
 
 PARSER_VERSION = "cds/0.8.0"
@@ -237,7 +237,7 @@ def _parse_image_candidate(path, job, item, step, sidecars, result, settings, wo
         if remaining <= 0:
             raise ToolLimitError(timeout_reason, "Content candidate time budget reached before parsing.")
         candidate_limits = {**limits, "parsed_records": limits["parsed_records"] - len(result["records"]),
-                            "record_payload_bytes": limits["record_payload_bytes"] - payload_bytes + 2}
+                            "record_payload_bytes": limits["record_payload_bytes"] - payload_bytes + EMPTY_RECORD_PAYLOAD_BYTES}
         args = [sys.executable, "-m", "cds.content_parser", step["parser"].split("/")[0], str(copy), json.dumps(candidate_limits)]
         if sidecars:
             args.append("--journal-aware")
@@ -401,7 +401,7 @@ def inspect_image(path, job, result, settings, work_dir):
     coverage_tools.mark(content, "running", "parsing", "Checking allocated browser, Registry, and event-log candidates from the inventory.",
                         total=len(candidates), candidates_found=len(candidates))
     attempted = 0
-    payload_bytes = 2  # Match the saved-run array accounting in Store.finish, including remapped artifact keys.
+    budget = RecordBudget(limits["record_payload_bytes"])
     payload_stopped = False
     for item, step, sidecars in candidates:
         skip = _image_candidate_skip_reason(item, deadline, attempted, len(result["records"]), payload_stopped)
@@ -417,7 +417,7 @@ def inspect_image(path, job, result, settings, work_dir):
         report(work_dir, f"Reading content candidate {attempted}/{len(candidates)}", 90)
         try:
             parsed = _parse_image_candidate(path, job, item, step, sidecars, result, settings, work_dir,
-                                            candidate_deadline, timeout_reason, payload_bytes)
+                                            candidate_deadline, timeout_reason, budget.used)
             parser_status = parsed["status"]
             step["parser"] = item["details"]["content"]["parser"] = parsed["parser"]
             saved = 0
@@ -427,14 +427,11 @@ def inspect_image(path, job, result, settings, work_dir):
                                   detail=f"Saved {saved} records; content candidate time budget reached.")
                     break
                 record["artifact_key"] = item["key"]
-                size = record_size(record)
                 # Inner keys are longer than "source"; recheck bytes after linking to keep the store's run bound exact.
-                if payload_bytes + size > limits["record_payload_bytes"]:
+                if not budget.append(result["records"], record):
                     parsed.update(status="partial", reason="record_payload_limit",
                                   detail=f"Saved {saved} records; image record payload budget reached.")
                     break
-                result["records"].append(record)
-                payload_bytes += size
                 saved += 1
             payload_stopped = parsed["reason"] == "record_payload_limit"
             detail = parsed["detail"].replace(SNAPSHOT_SCOPE, "").rstrip()
@@ -486,10 +483,13 @@ def inspect_image(path, job, result, settings, work_dir):
               + ("Inventory or partition discovery was incomplete; additional candidates may be missing. "
                  "Sidecars may also be missing from the available inventory. " if not inventory_complete else "")
               + "Only matching paths in the inventory were considered; this does not establish complete browser, Registry, or event-log coverage. "
-              + journal_detail + REGISTRY_SCOPE + " " + EVTX_SCOPE)
+              + journal_detail).rstrip()
     complete = inventory_complete and all(step["status"] == "complete" for _, step, _ in candidates)
     candidate_errors = any(status_counts.get(status, 0) for status in ("failed", "unsupported", "unknown"))
-    coverage["scope"] += " " + REGISTRY_SCOPE + " " + EVTX_SCOPE
+    for scope in (REGISTRY_SCOPE, EVTX_SCOPE):
+        if any(step["scope"] == scope for _, step, _ in candidates):
+            coverage["scope"] += " " + scope
+            detail += " " + scope
     coverage_tools.mark(content, "complete" if complete else "partial",
                         "inventory_incomplete" if not inventory_complete else "content_budget" if counts["budget_stops"]
                         else "candidate_errors" if candidate_errors else "candidates_examined" if complete else "candidates_partial",

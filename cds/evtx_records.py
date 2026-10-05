@@ -12,7 +12,7 @@ from Evtx.BinaryParser import ParseException
 from Evtx.Views import UnexpectedElementException
 
 import cds.timestamps as timestamps
-from cds.records import record_size
+from cds.records import RecordBudget
 
 PARSER = "windows-event-log/1"
 SCOPE = ("EVTX records from declared chunks only; inactive chunks and deleted records were not examined. "
@@ -136,7 +136,7 @@ def read_evtx(path, limits):
     counts = result["counts"] = {"examined_records": 0, "malformed_records": 0, "corrupt_chunks": 0,
                                  "shortened_records": 0, "missing_times": 0}
     issues = []
-    payload_bytes = 2
+    budget = RecordBudget(limits["record_payload_bytes"])
     deadline = time.monotonic() + limits["content_timeout"]
     try:
         with path.open("rb") as source:
@@ -247,12 +247,9 @@ def read_evtx(path, limits):
                     if len(issues) < 5:
                         issues.append(f"Record at {base + position:#x} skipped: {str(error)[:200]}.")
                 else:
-                    size_bytes = record_size(row)
-                    if payload_bytes + size_bytes > limits["record_payload_bytes"]:
+                    if not budget.append(result["records"], row):
                         result.update(status="partial", reason="record_payload_limit")
                         break
-                    result["records"].append(row)
-                    payload_bytes += size_bytes
                     counts["shortened_records"] += bool(row["details"].get("truncated_fields"))
                     counts["missing_times"] += row["event_time_us"] is None
                 last = position
