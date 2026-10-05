@@ -52,8 +52,14 @@ def worker_probe(root):
     rows = []
     for scenario in ("record_count", "payload", "input_at_limit", "input_over_limit"):
         if scenario == "payload":
-            with sqlite3.connect(path) as db:
-                db.execute("UPDATE urls SET title=?", ("x" * CONTENT_LIMITS["record_text_chars"],))
+            # sqlite3's context manager commits the transaction but does not close
+            # the connection; close it so the file handle is released here.
+            db = sqlite3.connect(path)
+            try:
+                with db:
+                    db.execute("UPDATE urls SET title=?", ("x" * CONTENT_LIMITS["record_text_chars"],))
+            finally:
+                db.close()
         if scenario == "input_at_limit":
             with path.open("ab") as output:
                 output.truncate(CONTENT_LIMITS["content_file_bytes"])

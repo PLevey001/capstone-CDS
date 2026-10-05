@@ -79,7 +79,7 @@ Run `.venv/bin/python scripts/benchmark_acceptance.py --output /tmp/cds-performa
 
 See [the measured JSON report](acceptance-performance.json) for samples, fixture sizes, versions and worker probes. The API workload is **five synthetic saved sources**, 12,500 artifacts (50,000 filesystem events) and 10,000 parsed-record rows spanning both browsers, Registry and EVTX. It is a query benchmark, not a claim that five large real images were parsed. Each request is warmed once, then measured seven times end to end through FastAPI TestClient, including response serialization. It excludes network/browser rendering. The current implementation scans and sorts the full saved timeline before returning a page.
 
-Measured October 5, 2026 on an **AMD Ryzen AI 9 HX 370**, 24 logical CPUs, 32,125,672 KiB reported RAM (30.64 GiB), Linux 7.1.13, Python 3.13.5 and SQLite 3.46.1. TSK was 4.12.1, e2fsprogs 1.47.2, ntfs-3g 2022.10.3, python-registry 1.3.1 and python-evtx 0.8.1. The saved fixture database occupied **7,966,720 bytes**.
+Measured October 5, 2026 on an **AMD Ryzen AI 9 HX 370**, 24 logical CPUs, 32,125,672 KiB reported RAM (30.64 GiB), Linux 7.1.13, Python 3.13.5 and SQLite 3.46.1. TSK was 4.12.1, e2fsprogs 1.47.2, ntfs-3g 2022.10.3, python-registry 1.3.1 and python-evtx 0.8.1. The saved fixture database occupied **7,974,912 bytes**.
 
 | Warm request | Median | Maximum of 7 | Response |
 | --- | ---: | ---: | ---: |

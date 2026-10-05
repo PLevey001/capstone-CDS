@@ -32,3 +32,8 @@ secrets/
 # Operating system files
 .DS_Store
 Thumbs.db
+
+# Editor swap and backup files
+*.kate-swp
+*.swp
+*~

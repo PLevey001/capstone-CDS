@@ -86,7 +86,7 @@ export default function RecordsPanel({
         Parsed records <span>{evidence.record_count}</span>
       </h3>
       <p className="muted">
-        Saved parsed records. Recorded URLs are displayed as evidence text.
+        Saved parsed records. Recorded values are displayed as evidence text.
       </p>
       {evidence.coverage?.scope && (
         <p className="muted">{evidence.coverage.scope}</p>

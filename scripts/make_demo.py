@@ -214,8 +214,13 @@ def make_acceptance(directory):
 
     # Negative sources are part of the same imported case, with explicit gaps.
     unknown = directory / "unknown.sqlite"
-    with sqlite3.connect(unknown) as db:
-        db.execute("CREATE TABLE unfamiliar_schema(id INTEGER)")
+    # Close explicitly: the context manager commits but leaves the handle open.
+    db = sqlite3.connect(unknown)
+    try:
+        with db:
+            db.execute("CREATE TABLE unfamiliar_schema(id INTEGER)")
+    finally:
+        db.close()
     source(unknown.name, unknown.read_bytes())
     source("damaged.evtx", evtx[:4100])  # Declared chunk is truncated.
     source("incomplete.img", partitioned_image()[:2048 * 512 + 512], kind="raw_image")
