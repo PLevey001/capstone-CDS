@@ -515,6 +515,12 @@ class Store:
                 db.execute("""UPDATE jobs SET status='queued',stage='Requeued after restart',progress=0,
                     active_run_id=NULL,started_at=NULL,finished_at=NULL,error=NULL WHERE id=?""", (row["id"],))
                 self.event(db, row["case_id"], "analysis_requeued", f"Run {run_id} was interrupted", row["evidence_id"])
+                # A terminated worker cannot run TemporaryDirectory cleanup; keep saved results and progress files.
+                for temporary in (self.root / "work" / run_id).glob("content-*"):
+                    if temporary.is_symlink():
+                        temporary.unlink()
+                    elif temporary.is_dir():
+                        shutil.rmtree(temporary)
 
     def claim(self, settings=None, parser_version=None):
         with self.connect() as db:

@@ -108,7 +108,7 @@ def test_empty_listing_is_complete_only_for_declared_scope(inspect, monkeypatch)
     assert result["coverage"]["status"] == "complete"
     assert steps(result)["filesystem:10"]["processed"] == 0
     assert steps(result)["filesystem:10"]["total"] is None
-    assert "File contents, unallocated space" in result["coverage"]["scope"]
+    assert "Other file contents, unallocated space" in result["coverage"]["scope"]
 
 
 def test_filesystem_fallback_does_not_claim_partition_layout_known(inspect, monkeypatch):
