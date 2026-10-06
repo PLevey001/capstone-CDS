@@ -154,6 +154,38 @@ export type Timeline = {
   total: number;
   events: TimelineEvent[];
 };
+export type BriefFact = {
+  id: string;
+  kind: string;
+  text: string;
+  source_id: string | null;
+  run_id: string | null;
+  artifact_id: number | null;
+};
+export type BriefStatement = {
+  text: string;
+  facts: string[];
+  numbers_match: boolean;
+};
+export type FactSheet = {
+  saved_sources: number;
+  facts: BriefFact[];
+  facts_digest: string;
+};
+export type CaseBrief = FactSheet & {
+  model: string;
+  generated_at: string;
+  duration_ms: number;
+  overview: BriefStatement[];
+  review: BriefStatement[];
+  withheld: number;
+};
+export type AiStatus = {
+  available: boolean;
+  model: string;
+  endpoint: string;
+  reason: string | null;
+};
 export type Health = {
   workers: number;
   coordinator_running: boolean;

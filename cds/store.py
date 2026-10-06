@@ -4,6 +4,7 @@ import logging
 import shutil
 import sqlite3
 import threading
+import urllib.parse
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -498,6 +499,89 @@ class Store:
                 event["at"] = event["at"].astimezone(timezone.utc).isoformat()
             return {"case": dict(case), "revision": current_revision, "offset": offset, "limit": limit,
                     "total": total, "events": events}
+
+    def brief_inputs(self, case_id, deleted_limit=5, top_limit=5):
+        """Bounded aggregates of the latest saved results, for the case brief fact sheet.
+
+        Everything here is counted or read from saved rows; nothing is inferred.
+        Itemized lists are capped and report how many entries they left out.
+        """
+        with self.connect() as db:
+            db.execute("BEGIN")
+            case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
+            if case is None:
+                return None
+            sources = []
+            for row in db.execute("""SELECT e.id,e.name,e.kind,e.size,e.imported_at,e.result_run_id AS run_id,
+                    j.status AS job_status,r.sequence AS run_number,r.status AS run_status,r.sha256,
+                    r.coverage,r.warnings,r.error
+                FROM evidence e JOIN jobs j ON j.evidence_id=e.id
+                LEFT JOIN analysis_runs r ON r.id=e.result_run_id
+                WHERE e.case_id=? ORDER BY e.imported_at,e.id""", (case_id,)).fetchall():
+                source = self.decode(row)
+                owner = (source["id"], source["run_id"])
+                source.update(files=0, directories=0, deleted_total=0, deleted=[], first_file_time=None,
+                              last_file_time=None, records=[], hosts=[], host_total=0, events=[])
+                if source["run_id"] is None:
+                    sources.append(source)
+                    continue
+                for kind, count in db.execute("""SELECT kind,COUNT(*) FROM artifacts
+                    WHERE evidence_id=? AND run_id=? GROUP BY kind""", owner):
+                    if kind == "file":
+                        source["files"] = count
+                    elif kind == "directory":
+                        source["directories"] = count
+                source["deleted_total"] = db.execute("""SELECT COUNT(*) FROM artifacts
+                    WHERE evidence_id=? AND run_id=? AND deleted=1 AND kind='file'""", owner).fetchone()[0]
+                source["deleted"] = [dict(item) for item in db.execute("""SELECT id,path,size FROM artifacts
+                    WHERE evidence_id=? AND run_id=? AND deleted=1 AND kind='file' ORDER BY id LIMIT ?""",
+                    (*owner, deleted_limit))]
+                stamps = []
+                for name in ("accessed", "modified", "metadata_changed", "created"):
+                    # Zero means unavailable; non-integer values are not timestamps.
+                    value = f"json_extract(details,'$.timestamps_unix.{name}')"
+                    low, high = db.execute(f"""SELECT MIN({value}),MAX({value}) FROM artifacts
+                        WHERE evidence_id=? AND run_id=? AND typeof({value})='integer' AND {value}>0""", owner).fetchone()
+                    stamps.extend(item for item in (low, high) if item is not None)
+                for name, unix in (("first_file_time", min(stamps, default=None)),
+                                   ("last_file_time", max(stamps, default=None))):
+                    try:
+                        source[name] = datetime.fromtimestamp(unix, timezone.utc).isoformat() if unix is not None else None
+                    except (OverflowError, OSError, ValueError):
+                        source[name] = None
+                for item in db.execute("""SELECT kind,COUNT(*) AS count,COUNT(DISTINCT artifact_id) AS files,
+                        MIN(event_time_us) AS first_us,MAX(event_time_us) AS last_us FROM parsed_records
+                    WHERE evidence_id=? AND run_id=? GROUP BY kind ORDER BY kind""", owner):
+                    record = dict(item)
+                    for name in ("first", "last"):
+                        value = record.pop(name + "_us")
+                        record[name] = timestamps.from_microseconds(value) if value is not None else None
+                    source["records"].append(record)
+                hosts = {}
+                for (url,) in db.execute("""SELECT json_extract(details,'$.url') FROM parsed_records
+                    WHERE evidence_id=? AND run_id=? AND kind='browser_visit'""", owner):
+                    try:
+                        host = urllib.parse.urlsplit(url).hostname if isinstance(url, str) else None
+                    except ValueError:
+                        host = None
+                    if host:
+                        hosts[host] = hosts.get(host, 0) + 1
+                source["host_total"] = len(hosts)
+                source["hosts"] = sorted(hosts.items(), key=lambda item: (-item[1], item[0]))[:top_limit]
+                source["events"] = [tuple(item) for item in db.execute("""SELECT summary,COUNT(*) FROM parsed_records
+                    WHERE evidence_id=? AND run_id=? AND kind='windows_event'
+                    GROUP BY summary ORDER BY COUNT(*) DESC,summary LIMIT ?""", (*owner, top_limit))]
+                sources.append(source)
+            return {"case": dict(case), "sources": sources}
+
+    def record_event(self, case_id, action, detail):
+        """Append one case-level activity entry; False if the case no longer exists."""
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM cases WHERE id=?", (case_id,)).fetchone() is None:
+                return False
+            self.event(db, case_id, action, detail)
+            return True
 
     def audit(self, case_id):
         with self.connect() as db:

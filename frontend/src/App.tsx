@@ -18,6 +18,7 @@ import {
   LoaderCircle,
   Pencil,
   Plus,
+  ScrollText,
   Search,
   ShieldCheck,
   Trash2,
@@ -34,6 +35,7 @@ import {
   type Health,
 } from "./api";
 import Modal from "./components/Modal";
+import BriefPanel, { NO_BRIEF, type BriefState } from "./components/BriefPanel";
 import EvidenceDrawer from "./components/EvidenceDrawer";
 import Status from "./components/Status";
 import TimelinePanel from "./components/TimelinePanel";
@@ -46,7 +48,7 @@ import {
   type CoverageFilter,
 } from "./components/Coverage";
 
-type Tab = "evidence" | "activity" | "timeline";
+type Tab = "evidence" | "activity" | "timeline" | "brief";
 type UploadItem = { name: string; status: string; failed?: boolean };
 
 export default function App() {
@@ -75,6 +77,9 @@ export default function App() {
     null,
   );
   const [message, setMessage] = useState("");
+  // Kept here, per case, so wording and errors outlive a tab or case switch
+  // and a reply that arrives late is never shown under another case.
+  const [briefs, setBriefs] = useState<Record<string, BriefState>>({});
   const pollGeneration = useRef(0);
   const currentCase = cases.find((c) => c.id === caseId);
 
@@ -133,6 +138,10 @@ export default function App() {
   const active = evidence.filter((e) => e.status === "running").length;
   const queued = evidence.filter((e) => e.status === "queued").length;
   const failed = evidence.filter((e) => e.status === "failed").length;
+  const sourceRevision = evidence
+    .map((item) => `${item.id}:${item.run_id ?? ""}`)
+    .sort()
+    .join("|");
   const shown = evidence.filter(
     (e) =>
       e.name.toLowerCase().includes(query.toLowerCase()) &&
@@ -377,6 +386,13 @@ export default function App() {
                 <Clock size={16} />
                 Timeline
               </button>
+              <button
+                className={tab === "brief" ? "active" : ""}
+                onClick={() => setTab("brief")}
+              >
+                <ScrollText size={16} />
+                Case brief
+              </button>
               <span className="panel-note">
                 <ShieldCheck size={13} />
                 Read-only source analysis
@@ -593,20 +609,38 @@ export default function App() {
                   history or a tamper-proof chain of custody.
                 </p>
               </div>
-            ) : (
+            ) : tab === "timeline" ? (
               <TimelinePanel
                 key={caseId}
                 caseId={caseId}
-                sourceRevision={evidence
-                  .map((item) => `${item.id}:${item.run_id ?? ""}`)
-                  .sort()
-                  .join("|")}
+                sourceRevision={sourceRevision}
                 onSelect={(event) =>
                   setSelected({
                     id: event.source_id,
                     runId: event.run_id ?? undefined,
                     artifactId: event.artifact_id ?? undefined,
                     recordId: event.record_id ?? undefined,
+                  })
+                }
+              />
+            ) : (
+              <BriefPanel
+                key={caseId}
+                caseId={caseId}
+                sourceRevision={sourceRevision}
+                state={briefs[caseId] ?? NO_BRIEF}
+                onChange={(patch) =>
+                  setBriefs((all) => ({
+                    ...all,
+                    [caseId]: { ...(all[caseId] ?? NO_BRIEF), ...patch },
+                  }))
+                }
+                onSelect={(fact) =>
+                  fact.source_id &&
+                  setSelected({
+                    id: fact.source_id,
+                    runId: fact.run_id ?? undefined,
+                    artifactId: fact.artifact_id ?? undefined,
                   })
                 }
               />
