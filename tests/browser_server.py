@@ -1,5 +1,7 @@
 """Disposable backend for Playwright. Never run against a user's workspace."""
+import json
 from pathlib import Path
+import re
 import tempfile
 from uuid import uuid4
 
@@ -10,11 +12,32 @@ from cds.analysis import analyze
 from cds.config import Settings
 from cds.main import create_app
 from scripts.make_browser_demo import make_chrome_history, make_firefox_history
+from tests.model_stub import LOCAL_MODEL, ModelStub, cite_first_facts
 
 
-def build_app(root):
-    app = create_app(Settings(root), start_workers=False)
+def flagged_brief(payload):
+    """Scripted wording with one wrong number and one statement that cites nothing."""
+    facts = dict(re.findall(r"^(F\d+): (.*)$", payload["messages"][-1]["content"], re.MULTILINE))
+    inventory = next(fact for fact, text in facts.items() if text.startswith("The inventory of"))
+    coverage = next(fact for fact, text in facts.items() if text.startswith("Coverage for"))
+    content = {"overview": [{"statement": "The case holds one analyzed disk image.", "facts": ["F1", "F2"]},
+                            {"statement": "The image lists 999 file entries.", "facts": [inventory]},
+                            {"statement": "Someone hid these files on purpose.", "facts": []}],
+               "review": [{"statement": "Coverage was not recorded, so check what was examined.", "facts": [coverage]}]}
+    return 200, {"message": {"role": "assistant", "content": json.dumps(content)}}
+
+
+def build_app(root, model=None):
+    settings = Settings(root, ai_url=model.url) if model else Settings(root)
+    app = create_app(settings, start_workers=False)
     store = app.state.store
+
+    @app.post("/test/model/{mode}")
+    def model_mode(mode: str):
+        # The model server is a scripted stub; these modes are the states the interface must explain.
+        model.models = [] if mode == "missing" else [LOCAL_MODEL]
+        model.reply = flagged_brief if mode == "flagged" else cite_first_facts
+        return {"mode": mode}
 
     @app.get("/test/chrome-file")
     def chrome_file():
@@ -68,5 +91,5 @@ def build_app(root):
 
 
 if __name__ == "__main__":
-    with tempfile.TemporaryDirectory(prefix="cds-browser-tests-") as directory:
-        uvicorn.run(build_app(Path(directory)), host="127.0.0.1", port=8765, log_level="warning")
+    with tempfile.TemporaryDirectory(prefix="cds-browser-tests-") as directory, ModelStub() as stub:
+        uvicorn.run(build_app(Path(directory), stub), host="127.0.0.1", port=8765, log_level="warning")

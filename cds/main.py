@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+import cds.case_brief as case_brief
 from cds.analysis import ToolLimitError, extract_artifact
 from cds.config import Settings
 from cds.coordinator import Coordinator
@@ -86,6 +87,7 @@ def create_app(settings=None, start_workers=True):
     upload_slots = threading.BoundedSemaphore(3)
     case_mutations = threading.Lock()
     active_uploads = Counter()
+    brief_slot = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -339,6 +341,50 @@ def create_app(settings=None, start_workers=True):
         if data is None:
             raise HTTPException(404, "Case not found")
         return data
+
+    def fact_sheet(case_id):
+        inputs = store.brief_inputs(case_id)
+        if inputs is None:
+            raise HTTPException(404, "Case not found")
+        facts = case_brief.build_facts(inputs)
+        saved = sum(1 for source in inputs["sources"] if source["run_id"] is not None)
+        return {"case": inputs["case"], "saved_sources": saved, "facts": facts,
+                "facts_digest": case_brief.digest(facts)}
+
+    @app.get("/api/ai/status")
+    def ai_status():
+        """Whether the optional model on this machine can word a case brief right now."""
+        return case_brief.status(settings)
+
+    @app.get("/api/cases/{case_id}/brief")
+    def brief_facts(case_id: str):
+        """Fact sheet computed from the latest saved results. No model is involved."""
+        return fact_sheet(case_id)
+
+    @app.post("/api/cases/{case_id}/brief")
+    def brief(case_id: str):
+        """Fact sheet plus wording from a model on this machine.
+
+        The model receives only the fact sheet. A statement is returned only if it
+        cites at least one real fact; numbers absent from its cited facts are flagged.
+        The wording is not saved; the activity log records that it was generated.
+        """
+        sheet = fact_sheet(case_id)
+        if not sheet["saved_sources"]:
+            raise HTTPException(409, "There are no saved analysis results to summarize yet.")
+        if not brief_slot.acquire(blocking=False):
+            raise HTTPException(409, "A case brief is already being generated. Wait for it to finish.")
+        try:
+            result = case_brief.generate(settings, sheet["facts"])
+        except case_brief.BriefError as error:
+            raise HTTPException(error.status, str(error)) from error
+        finally:
+            brief_slot.release()
+        shown = len(result["overview"]) + len(result["review"])
+        store.record_event(case_id, "case_brief_generated",
+                           f"Model {result['model']} worded {shown} statements from {len(sheet['facts'])} facts "
+                           f"(fact sheet {sheet['facts_digest'][:12]}); {result['withheld']} withheld")
+        return {**sheet, **result}
 
     EXPORT_COLUMNS = [
         "evidence_id", "run_id", "run_number", "artifact_id", "job_status", "current_job_status",
