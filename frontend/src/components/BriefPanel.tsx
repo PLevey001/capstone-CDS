@@ -20,6 +20,8 @@ export type BriefState = {
   busy: boolean;
   value: CaseBrief | null;
   error: string;
+  revision?: string;
+  requestId?: string;
 };
 export const NO_BRIEF: BriefState = { busy: false, value: null, error: "" };
 
@@ -38,6 +40,7 @@ export default function BriefPanel({
 }) {
   const { busy, value: brief, error: briefError } = state;
   const [sheet, setSheet] = useState<FactSheet | null>(null);
+  const [sheetRevision, setSheetRevision] = useState("");
   const [sheetError, setSheetError] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [status, setStatus] = useState<AiStatus | null>(null);
@@ -45,10 +48,15 @@ export default function BriefPanel({
 
   useEffect(() => {
     const controller = new AbortController();
+    setSheet(null);
+    setSheetRevision("");
     setSheetError("");
     api<FactSheet>(`/cases/${caseId}/brief`, { signal: controller.signal })
       .then((result) => {
-        if (!controller.signal.aborted) setSheet(result);
+        if (!controller.signal.aborted) {
+          setSheet(result);
+          setSheetRevision(sourceRevision);
+        }
       })
       .catch((failure) => {
         if (!controller.signal.aborted) setSheetError(failure.message);
@@ -73,7 +81,14 @@ export default function BriefPanel({
 
   // A brief worded from an earlier fact sheet numbers its facts differently.
   const current =
-    !!brief && !!sheet && brief.facts_digest === sheet.facts_digest;
+    !!brief &&
+    !!sheet &&
+    !busy &&
+    !briefError &&
+    !sheetError &&
+    sheetRevision === sourceRevision &&
+    state.revision === sourceRevision &&
+    brief.facts_digest === sheet.facts_digest;
   const showFact = (id: string) => {
     setFocused(id);
     document
@@ -90,7 +105,7 @@ export default function BriefPanel({
             <li key={index}>
               <p>{statement.text}</p>
               <div className="brief-citations">
-                <span>Built from</span>
+                <span>References (not proof)</span>
                 {statement.facts.map((id) => (
                   <button
                     key={id}
@@ -104,13 +119,6 @@ export default function BriefPanel({
                   </button>
                 ))}
               </div>
-              {!statement.numbers_match && (
-                <p className="brief-flag">
-                  <CircleAlert size={13} />
-                  Contains a number that is not in its cited facts. Check it
-                  before relying on it.
-                </p>
-              )}
             </li>
           ))}
         </ul>
@@ -130,6 +138,11 @@ export default function BriefPanel({
                 : "Local model unavailable"}
           </span>
         </div>
+        <p className="notice" role="note">
+          Unverified AI wording. Citations are references, not proof of meaning.
+          Every generated statement may be wrong or misleading. Check the saved
+          run and coverage.
+        </p>
         {brief ? (
           <div className="brief-result">
             {!current && (
@@ -141,21 +154,26 @@ export default function BriefPanel({
             )}
             {statements("Overview", brief.overview)}
             {statements("Look at first", brief.review)}
-            <p className="brief-provenance">
+            <p className="brief-provenance brief-generation">
               Worded by {brief.model} on this machine in{" "}
               {(brief.duration_ms / 1000).toFixed(1)} s ·{" "}
               {utcDate(brief.generated_at.replace(/\.\d+/, ""))} ·{" "}
               {brief.overview.length + brief.review.length} statements shown
               {brief.withheld > 0 &&
-                `, ${brief.withheld} withheld because they cited no fact`}
+                `, ${brief.withheld} withheld (invalid references, numbers, format, length, or overflow)`}
               . Not saved: it is cleared when the page reloads.
+            </p>
+            <p className="brief-provenance">
+              {brief.context?.notice} Input budget: {brief.context?.input_bytes}
+              /{brief.context?.input_limit_bytes} UTF-8 bytes; output reserve:{" "}
+              {brief.context?.output_tokens} tokens.
             </p>
           </div>
         ) : (
           <p className="brief-intro">
             A model running on this machine can word a short brief from the fact
-            sheet below. It receives only those facts, and a statement is shown
-            only when it cites at least one of them.
+            sheet below. It receives a bounded selection with scope and omission
+            notices. Reference checks do not verify its conclusions.
           </p>
         )}
         {status && !status.available && (
@@ -172,16 +190,37 @@ export default function BriefPanel({
         <div className="brief-actions">
           <button
             className="primary-button"
-            disabled={busy || !status?.available || !sheet?.saved_sources}
+            disabled={
+              busy ||
+              !status?.available ||
+              !sheet?.saved_sources ||
+              sheetRevision !== sourceRevision ||
+              !!sheetError
+            }
             onClick={async () => {
-              onChange({ busy: true, error: "" });
+              const requestId = crypto.randomUUID();
+              onChange({
+                busy: true,
+                error: "",
+                revision: sourceRevision,
+                requestId,
+              });
               try {
                 const value = await api<CaseBrief>(`/cases/${caseId}/brief`, {
                   method: "POST",
                 });
-                onChange({ busy: false, value });
+                onChange({
+                  busy: false,
+                  value,
+                  revision: sourceRevision,
+                  requestId,
+                });
               } catch (failure) {
-                onChange({ busy: false, error: (failure as Error).message });
+                onChange({
+                  busy: false,
+                  error: (failure as Error).message,
+                  requestId,
+                });
                 checkModel();
               }
             }}
@@ -228,7 +267,7 @@ export default function BriefPanel({
               Retry fact sheet
             </button>
           </div>
-        ) : sheet ? (
+        ) : sheet && sheetRevision === sourceRevision ? (
           <ol className="brief-facts">
             {sheet.facts.map((fact) => (
               <li

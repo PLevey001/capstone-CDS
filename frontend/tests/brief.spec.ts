@@ -32,11 +32,11 @@ test("fact sheet needs no model and says why wording is unavailable", async ({
 }) => {
   const fixture = await openBrief(page, "missing");
   const facts = page.locator(".brief-facts li");
-  await expect(facts).toHaveCount(6);
+  await expect(facts).toHaveCount(7);
   await expect(facts.first()).toHaveText(
     `F1Case "${fixture.case.name}" has 1 evidence source; 1 of them has saved analysis results.`,
   );
-  await expect(facts.nth(3)).toContainText(
+  await expect(facts.nth(4)).toContainText(
     'The inventory of "fixture.img" lists 205 file entries and 0 directories',
   );
   await expect(page.getByText("Local model unavailable")).toBeVisible();
@@ -73,37 +73,33 @@ test("fact sheet needs no model and says why wording is unavailable", async ({
   await expect(page.getByRole("dialog")).toContainText("fixture.img");
 });
 
-test("wording cites facts, flags unsupported numbers, and goes stale when results change", async ({
+test("wording is unverified, withholds unsupported numbers, and goes stale when results change", async ({
   page,
 }) => {
   const fixture = await openBrief(page, "flagged");
   await page.getByRole("button", { name: "Generate brief" }).click();
   const overview = page.getByRole("list", { name: "Overview" });
-  await expect(overview.getByRole("listitem")).toHaveCount(2);
+  await expect(overview.getByRole("listitem")).toHaveCount(1);
   await expect(overview).not.toContainText("on purpose");
-  const flagged = overview.getByRole("listitem").nth(1);
-  await expect(flagged).toContainText("The image lists 999 file entries.");
-  await expect(flagged).toContainText(
-    "Contains a number that is not in its cited facts.",
-  );
-  await expect(overview.getByRole("listitem").first()).not.toContainText(
-    "Contains a number",
-  );
+  const cited = overview.getByRole("listitem").first();
+  await expect(overview).not.toContainText("999 file entries");
+  await expect(page.getByRole("note")).toContainText("Unverified AI wording");
+  await expect(page.getByRole("note")).toContainText("references, not proof");
   await expect(
     page.getByRole("list", { name: "Look at first" }).getByRole("listitem"),
   ).toHaveText(/Coverage was not recorded, so check what was examined\./);
-  await expect(page.locator(".brief-provenance")).toContainText(
-    "3 statements shown, 1 withheld because they cited no fact",
+  await expect(page.locator(".brief-generation")).toContainText(
+    "2 statements shown, 2 withheld (invalid references, numbers, format, length, or overflow)",
   );
   // A citation points at the fact it was built from.
-  await flagged.getByRole("button", { name: "Show fact F4" }).click();
-  await expect(page.locator("#brief-fact-F4")).toHaveClass(/focused/);
+  await cited.getByRole("button", { name: "Show fact F2" }).click();
+  await expect(page.locator("#brief-fact-F2")).toHaveClass(/focused/);
   await expect(page.locator(".brief-facts li.focused")).toHaveCount(1);
   // The wording survives leaving the tab, and generating is recorded in the activity log.
   await page.getByRole("button", { name: "Activity log", exact: true }).click();
   await expect(page.getByText("case brief generated")).toBeVisible();
   await page.getByRole("button", { name: "Case brief", exact: true }).click();
-  await expect(overview.getByRole("listitem")).toHaveCount(2);
+  await expect(overview.getByRole("listitem")).toHaveCount(1);
   await expect(
     page.getByRole("button", { name: "Generate again" }),
   ).toBeEnabled();
@@ -120,14 +116,59 @@ test("wording cites facts, flags unsupported numbers, and goes stale when result
     .getByRole("button", { name: fixture.case.name, exact: true })
     .click();
   await page.getByRole("button", { name: "Case brief", exact: true }).click();
-  await expect(overview.getByRole("listitem")).toHaveCount(2);
+  await expect(overview.getByRole("listitem")).toHaveCount(1);
   // New saved results renumber the fact sheet, so the old wording is marked and its citations stop.
   await page.request.post(`/test/finish/${fixture.source}`, { headers });
   await expect(
     page.getByText("Saved results changed after this brief was worded."),
   ).toBeVisible();
   await expect(
-    flagged.getByRole("button", { name: "Show fact F4" }),
+    cited.getByRole("button", { name: "Show fact F2" }),
   ).toBeDisabled();
   await expect(page.locator(".brief-facts li.focused")).toHaveCount(0);
+});
+
+test("fact refresh and failure disable old citations, including after rename", async ({
+  page,
+}) => {
+  const fixture = await openBrief(page, "ready");
+  await page.getByRole("button", { name: "Generate brief" }).click();
+  const citation = page.getByRole("button", {
+    name: "Show fact F1",
+    exact: true,
+  });
+  await expect(citation).toBeEnabled();
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(`**/api/cases/${fixture.case.id}/brief`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await held;
+    await route.fulfill({
+      status: 503,
+      json: { detail: "Synthetic fact refresh failed" },
+    });
+  });
+  await page.getByRole("button", { name: "Rename case", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("textbox")
+    .fill("Renamed learning case");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Save name" })
+    .click();
+  await expect(citation).toBeDisabled();
+  await expect(
+    page.getByText("Loading fact sheet…", { exact: true }),
+  ).toBeVisible();
+  release();
+  await expect(page.getByRole("alert")).toContainText(
+    "Synthetic fact refresh failed",
+  );
+  await expect(citation).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: "Generate again" }),
+  ).toBeDisabled();
 });

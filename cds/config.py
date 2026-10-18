@@ -48,6 +48,7 @@ class Settings:
     ai_url: str = "http://127.0.0.1:11434"
     ai_model: str = "llama3.2:3b"
     ai_timeout: int = 180
+    ai_context: int = 8192
 
     def __post_init__(self):
         if not 1 <= self.workers <= 8:
@@ -57,6 +58,8 @@ class Settings:
         if not loopback_http_url(self.ai_url):
             raise ValueError("CDS_AI_URL must be a plain http:// address on this machine, "
                              "for example http://127.0.0.1:11434")
+        if not 4096 <= self.ai_context <= 32768:
+            raise ValueError("CDS_AI_CONTEXT must be between 4096 and 32768")
         if not self.ai_model.strip() or len(self.ai_model) > 200:
             raise ValueError("CDS_AI_MODEL must name one installed local model")
 
@@ -71,4 +74,5 @@ class Settings:
             ai_url=os.environ.get("CDS_AI_URL", "http://127.0.0.1:11434"),
             ai_model=os.environ.get("CDS_AI_MODEL", "llama3.2:3b"),
             ai_timeout=int(os.environ.get("CDS_AI_TIMEOUT", "180")),
+            ai_context=int(os.environ.get("CDS_AI_CONTEXT", "8192")),
         )

@@ -6,6 +6,8 @@ Supported content includes Chrome/Chromium and Firefox history snapshots, Window
 
 The interface offers file inventory, saved records, coverage diagnostics, analysis history, downloads and CSV/JSON exports. One paginated UTC timeline combines filesystem MAC times, browser visits, Registry key last-write times and event creation times. Registry values do not receive invented timestamps. Reanalysis preserves historical results; downloads use only the current saved run. Coverage describes what was examined and any gaps, independently of whether a job finished.
 
+Optional **Case brief** and **Learn with AI** use a local Ollama model. Learn with AI supports general concept questions and follow-up questions about a bounded selection of computed case facts. **All generated prose is unverified; citations are references, not proof.** The computed fact sheet and reviewed concept notes remain available without a model. See [local AI setup, use, privacy and limitations](docs/local-ai.md). AI is never required for normal forensic functions.
+
 The [combined acceptance case and numbered walkthrough](docs/acceptance.md) define the demonstrated scope and limits. **E01 is deliberately excluded:** the local TSK 4.12.1/libewf 20140816 combination segfaults on EWF input, so no EWF analysis path was added. Segmented uploads, unallocated carving, encryption, Registry log replay and rendered EVTX messages are not supported. This is not a certified forensic tool or a claim of unlimited image scale.
 
 ## Setup

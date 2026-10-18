@@ -16,10 +16,11 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import cds.case_brief as case_brief
+from cds import learning, local_model
 from cds.analysis import ToolLimitError, extract_artifact
 from cds.config import Settings
 from cds.coordinator import Coordinator
@@ -87,7 +88,7 @@ def create_app(settings=None, start_workers=True):
     upload_slots = threading.BoundedSemaphore(3)
     case_mutations = threading.Lock()
     active_uploads = Counter()
-    brief_slot = threading.Lock()
+    generation_slot = threading.Lock()
 
     @asynccontextmanager
     async def lifespan(app):
@@ -349,12 +350,16 @@ def create_app(settings=None, start_workers=True):
         facts = case_brief.build_facts(inputs)
         saved = sum(1 for source in inputs["sources"] if source["run_id"] is not None)
         return {"case": inputs["case"], "saved_sources": saved, "facts": facts,
-                "facts_digest": case_brief.digest(facts)}
+                "facts_digest": case_brief.digest(facts),
+                "provenance": {"case_id": case_id, "case_name": inputs["case"]["name"],
+                               "sources": [{key: source.get(key) for key in
+                                            ("id", "run_id", "active_run_id", "job_status", "run_status")}
+                                           for source in inputs["sources"]]}}
 
     @app.get("/api/ai/status")
     def ai_status():
-        """Whether the optional model on this machine can word a case brief right now."""
-        return case_brief.status(settings)
+        """Whether the configured local model is available for brief or chat generation."""
+        return local_model.status(settings)
 
     @app.get("/api/cases/{case_id}/brief")
     def brief_facts(case_id: str):
@@ -366,25 +371,74 @@ def create_app(settings=None, start_workers=True):
         """Fact sheet plus wording from a model on this machine.
 
         The model receives only the fact sheet. A statement is returned only if it
-        cites at least one real fact; numbers absent from its cited facts are flagged.
+        cites only real facts and has no numeric mismatch; meaning remains unverified.
         The wording is not saved; the activity log records that it was generated.
         """
         sheet = fact_sheet(case_id)
         if not sheet["saved_sources"]:
             raise HTTPException(409, "There are no saved analysis results to summarize yet.")
-        if not brief_slot.acquire(blocking=False):
-            raise HTTPException(409, "A case brief is already being generated. Wait for it to finish.")
+        if not generation_slot.acquire(blocking=False):
+            raise HTTPException(409, "A local AI answer is already being generated. Wait for it to finish.")
         try:
             result = case_brief.generate(settings, sheet["facts"])
-        except case_brief.BriefError as error:
+            if fact_sheet(case_id)["facts_digest"] != sheet["facts_digest"]:
+                raise HTTPException(409, "Case results changed during generation. Generate again.")
+        except local_model.ModelError as error:
             raise HTTPException(error.status, str(error)) from error
         finally:
-            brief_slot.release()
+            generation_slot.release()
         shown = len(result["overview"]) + len(result["review"])
         store.record_event(case_id, "case_brief_generated",
-                           f"Model {result['model']} worded {shown} statements from {len(sheet['facts'])} facts "
+                           f"Model {result['model']} worded {shown} statements from {result['context']['facts_sent']} facts sent; "
+                           f"{result['context']['facts_omitted']} facts omitted "
                            f"(fact sheet {sheet['facts_digest'][:12]}); {result['withheld']} withheld")
         return {**sheet, **result}
+
+    @app.get("/api/ai/glossary")
+    def glossary():
+        return learning.GLOSSARY
+
+    def chat_answer(case_id, question):
+        require_case(case_id)
+        if not generation_slot.acquire(blocking=False):
+            raise HTTPException(409, "A local AI answer is already being generated. Wait for it to finish.")
+        try:
+            sheet = fact_sheet(case_id) if question.mode == "case" else None
+            if sheet and question.facts_digest and question.facts_digest != sheet["facts_digest"]:
+                raise HTTPException(409, "Case facts changed or belong to another case. Clear the conversation and try again.")
+            result = learning.generate(settings, question, sheet)
+            require_case(case_id)
+            if sheet and fact_sheet(case_id)["facts_digest"] != sheet["facts_digest"]:
+                raise HTTPException(409, "Case results changed during generation. Clear the conversation and try again.")
+            # Chat text and references are never written to the audit log or Store.
+            return result
+        except local_model.ModelError as error:
+            raise HTTPException(error.status, str(error)) from error
+        finally:
+            generation_slot.release()
+
+    @app.post("/api/cases/{case_id}/chat")
+    async def chat(case_id: str, request: Request):
+        # Bound bytes before JSON parsing, including chunked requests without Content-Length.
+        length = request.headers.get("content-length", "")
+        if length and (not length.isascii() or not length.isdecimal()):
+            raise HTTPException(422, "Content-Length must contain ASCII decimal digits.")
+        if length and (len(length) > 8 or int(length) > learning.BODY_BYTES):
+            raise HTTPException(422, "Chat request exceeds 16 KiB. Clear the conversation or shorten the question.")
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > learning.BODY_BYTES:
+                raise HTTPException(422, "Chat request exceeds 16 KiB. Clear the conversation or shorten the question.")
+            body.extend(chunk)
+        try:
+            question = learning.ChatInput.model_validate_json(body)
+        except ValidationError as error:
+            # Do not echo user conversation in validation errors.
+            raise HTTPException(422, "Use a nonblank question of at most 2000 UTF-8 bytes, concepts/case mode, "
+                                     "and at most 8 history messages in user/assistant pairs. "
+                                     "No extra fields are accepted. Clear the conversation if needed.") from error
+        # The worker owns the slot until generation actually ends, even on disconnect.
+        return await asyncio.to_thread(chat_answer, case_id, question)
 
     EXPORT_COLUMNS = [
         "evidence_id", "run_id", "run_number", "artifact_id", "job_status", "current_job_status",

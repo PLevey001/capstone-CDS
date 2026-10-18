@@ -1,29 +1,22 @@
-"""Case brief: a fact sheet computed by CDS, plus optional local-model wording that must cite it.
+"""Computed saved-result facts and optional, explicitly unverified model prose.
 
-The fact sheet is built from saved results with fixed wording. A model running on
-this machine may then phrase a short brief, but it only ever sees the fact sheet,
-and every statement it returns is checked against the facts it cites before it is
-shown. The model is a writer, never a source.
+Reference and number checks are mechanical filters, not verification of meaning.
 """
 
 import hashlib
-import http.client
 import json
 import re
-import time
-import urllib.error
-import urllib.request
+import unicodedata
 from datetime import datetime, timezone
 
-from cds.config import loopback_http_url
+from cds import local_model
+from cds.local_model import ModelError
 
 MAX_FACTS = 60
 FACT_TEXT_CHARS = 120
 STATEMENT_CHARS = 400
 MAX_OVERVIEW = 5
 MAX_REVIEW = 4
-RESPONSE_BYTES = 2 * 1024**2
-STATUS_TIMEOUT = 3
 
 KIND_LABELS = {"raw_image": "raw disk image", "file": "logical file"}
 RECORD_LABELS = {"browser_visit": "browser visit", "registry_key": "Registry key",
@@ -44,15 +37,6 @@ Return JSON with two lists:
 - "overview": 2 to 5 plain-English statements describing what the evidence contains.
 - "review": 0 to 4 statements naming specific items to look at first, such as deleted file entries, failed analysis or coverage gaps.
 Each list item is {"statement": "<one or two sentences>", "facts": ["F1", "F2"]}."""
-
-
-class BriefError(Exception):
-    """A brief could not be produced; status is the HTTP status the API should return."""
-
-    def __init__(self, status, message, upstream=None):
-        super().__init__(message)
-        self.status = status
-        self.upstream = upstream  # HTTP status from the model server, when it sent one
 
 
 def clean(value, limit=FACT_TEXT_CHARS):
@@ -90,7 +74,8 @@ def size_text(size):
 def source_facts(source):
     """Fixed-wording facts for one source: the identity fact first, then details."""
     name = f'"{clean(source["name"])}"'
-    link = {"source_id": source["id"], "run_id": source["run_id"]}
+    link = {"source_id": source["id"], "run_id": source["run_id"],
+            "active_run_id": source.get("active_run_id"), "job_status": source["job_status"]}
     kind = KIND_LABELS.get(source["kind"], clean(source["kind"], 40))
     identity = f"Source {name} is a {kind} of {size_text(source['size'])}"
     imported = when(source["imported_at"])
@@ -103,6 +88,9 @@ def source_facts(source):
         identity += f". Its SHA-256 begins {source['sha256'][:12]}"
     identity += f". Latest saved result: run {source['run_number']}, {clean(source['run_status'], 20)}."
     facts = [{"kind": "source", "text": identity, **link}]
+    if source["job_status"] != source["run_status"]:
+        facts.append({"kind": "coverage", "text": f"Current job for {name} is {clean(source['job_status'], 20)}. "
+                      "These facts describe the latest saved result, not the current job.", **link})
     if source["error"]:
         facts.append({"kind": "coverage", "text": f"Analysis of {name} failed: {clean(source['error'], 200)}", **link})
     coverage = source["coverage"] or {}
@@ -117,10 +105,31 @@ def source_facts(source):
             text += (f" {plural(len(gaps), 'step')} did not complete, starting with "
                      f"\"{clean(first.get('label', ''), 60)}\": {clean(first.get('detail', ''), 160)}")
         facts.append({"kind": "coverage", "text": text, **link})
+    # Preserve saved source scope and parser details even when coverage is complete.
+    # These notes stay whole; model selection omits a source if its notes cannot fit.
+    notes = [coverage.get("scope", "")]
+    for step in coverage.get("steps", []):
+        notes.extend(step.get(key, "") for key in ("scope", "sidecar_scope", "detail"))
+    notes.extend(source.get("warnings") or [])
+    seen = set()
+    for note in notes:
+        if not isinstance(note, str):
+            continue
+        text = clean(note, len(note) + 1)
+        if text and text not in seen:
+            seen.add(text)
+            facts.append({"kind": "source_scope", "text": f"Saved scope/detail for {name}: {text}", **link})
     if source["kind"] == "raw_image":
-        text = (f"The inventory of {name} lists {plural(source['files'], 'file entry', 'file entries')} and "
-                f"{plural(source['directories'], 'directory', 'directories')}; "
-                f"{plural(source['deleted_total'], 'file entry is', 'file entries are')} marked deleted.")
+        inventories = [step for step in coverage.get("steps", [])
+                       if step.get("id") == "inventory" or str(step.get("id", "")).startswith("filesystem:")]
+        measured = source["files"] or source["directories"] or any(
+            step.get("status") in ("complete", "partial") for step in inventories)
+        if measured:
+            text = (f"The inventory of {name} lists {plural(source['files'], 'file entry', 'file entries')} and "
+                    f"{plural(source['directories'], 'directory', 'directories')}; "
+                    f"{plural(source['deleted_total'], 'file entry is', 'file entries are')} marked deleted.")
+        else:
+            text = f"The inventory of {name} was not measured; file counts are unavailable."
         facts.append({"kind": "inventory", "text": text, **link})
     first, last = when(source["first_file_time"]), when(source["last_file_time"])
     if first and last:
@@ -137,11 +146,18 @@ def source_facts(source):
         elif record["kind"] == "registry_value":
             text += "; Registry values carry no timestamps"
         facts.append({"kind": "records", "text": text + ".", **link})
-    if source["hosts"]:
+    omissions = source.get("host_omissions", {"truncated": 0, "missing": 0, "unclassifiable": 0})
+    excluded = sum(omissions.values())
+    if source["hosts"] or excluded:
         listed = ", ".join(f"{clean(host, 80)} ({plural(count, 'visit')})" for host, count in source["hosts"])
-        facts.append({"kind": "browser", **link,
-                      "text": f"Browser visits in {name} cover {plural(source['host_total'], 'host')}; "
-                              f"the most visited: {listed}. Visits may include synced or imported activity."})
+        text = f"Browser visits in {name} have {plural(source['host_total'], 'host')} classified"
+        text += f"; the most visited: {listed}." if listed else "."
+        if excluded:
+            text += (f" {plural(excluded, 'visit')} excluded from host counts: "
+                     f"{plural(omissions['truncated'], 'truncated URL')}, "
+                     f"{plural(omissions['missing'], 'missing URL')}, "
+                     f"{plural(omissions['unclassifiable'], 'unclassifiable URL')}.")
+        facts.append({"kind": "browser", **link, "text": text + " Visits may include synced or imported activity."})
     if source["events"]:
         listed = ", ".join(f"{clean(summary, 80)} ({count:,})" for summary, count in source["events"])
         facts.append({"kind": "events", "text": f"Most frequent Windows events in {name}: {listed}.", **link})
@@ -162,37 +178,15 @@ def build_facts(inputs):
     """The numbered fact sheet for a case. Deterministic for the same saved results."""
     case, sources = inputs["case"], inputs["sources"]
     saved = sum(1 for source in sources if source["run_id"] is not None)
-    facts = [{"kind": "case",
+    facts = [{"kind": "case", "case_name": case["name"],
               "text": f'Case "{clean(case["name"])}" has {plural(len(sources), "evidence source")}; '
                       f"{saved:,} of them {'has' if saved == 1 else 'have'} saved analysis results."}]
-    described = [source_facts(source) for source in sources]
-    # Every source is named before any is described, so a large case loses depth
-    # before it loses sources. Within a source, limits and counts come before
-    # itemized entries, so a shortened source keeps its totals.
-    room = MAX_FACTS - 2
-    identities = [group[0] for group in described][:room]
-    unnamed = len(described) - len(identities)
-    room -= len(identities)
-    bare, shortened = 0, False
-    for identity, group in zip(identities, described):
-        extra = group[1:]
-        kept = extra[:room]
-        room -= len(kept)
-        # Room runs out once, so at most one source is cut partway.
-        shortened = shortened or 0 < len(kept) < len(extra)
-        bare += bool(extra) and not kept
-        facts.append(identity)
-        facts.extend(kept)
-    scope = SCOPE_NOTE
-    limits = [text for count, text in (
-        (unnamed, plural(unnamed, "source is", "sources are") + " not listed"),
-        (shortened, "1 listed source has only part of its detail here"),
-        (bare, plural(bare, "listed source has", "listed sources have") + " no detail here")) if count]
-    if limits:
-        scope += f" This fact sheet is capped at {MAX_FACTS} facts: " + "; ".join(limits) + "."
-    facts.append({"kind": "scope", "text": scope})
+    for source in sources:
+        facts.extend(source_facts(source))
+    facts.append({"kind": "scope", "text": SCOPE_NOTE})
     for number, fact in enumerate(facts, 1):
         fact["id"] = f"F{number}"
+        fact["case_id"] = case.get("id")
         for key in ("source_id", "run_id", "artifact_id"):
             fact.setdefault(key, None)
     return facts
@@ -200,13 +194,14 @@ def build_facts(inputs):
 
 def digest(facts):
     """Identifies the exact fact sheet a brief was written from."""
-    return hashlib.sha256(json.dumps([[fact["id"], fact["text"]] for fact in facts]).encode()).hexdigest()
+    return hashlib.sha256(local_model.encoded(facts)).hexdigest()
 
 
 def numbers(text):
-    """Number tokens for comparing a statement with its facts; 2,048 and 2048 match, 09 and 9 match."""
+    """Coarse decimal-token comparison, without converting untrusted strings to integers."""
+    text = "".join(str(unicodedata.decimal(char)) if char.isdecimal() else char for char in text)
     text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text)
-    return {token if "." in token else str(int(token)) for token in re.findall(r"\d+(?:\.\d+)?", text)}
+    return {token if "." in token else (token.lstrip("0") or "0") for token in re.findall(r"\d+(?:\.\d+)?", text)}
 
 
 def build_prompt(facts):
@@ -214,25 +209,25 @@ def build_prompt(facts):
 
 
 def response_schema(facts):
-    item = {"type": "object", "required": ["statement", "facts"], "properties": {
-        "statement": {"type": "string"},
-        "facts": {"type": "array", "items": {"type": "string", "enum": [fact["id"] for fact in facts]}}}}
-    return {"type": "object", "required": ["overview", "review"], "properties": {
+    item = {"type": "object", "additionalProperties": False, "required": ["statement", "facts"], "properties": {
+        "statement": {"type": "string", "maxLength": STATEMENT_CHARS},
+        "facts": {"type": "array", "minItems": 1, "items": {"type": "string", "enum": [fact["id"] for fact in facts]}}}}
+    return {"type": "object", "additionalProperties": False, "required": ["overview", "review"], "properties": {
         "overview": {"type": "array", "items": item}, "review": {"type": "array", "items": item}}}
 
 
 def check_statements(text, facts):
-    """Keep only statements tied to real facts; flag numbers their facts do not contain.
+    """Filter malformed/overlong statements, unknown refs, numeric mismatches and overflow.
 
-    Returns (overview, review, withheld). A statement with no valid fact ID is
-    withheld rather than shown, whatever it says.
+    This does not check whether a statement means what its references mean.
     """
     try:
         data = json.loads(text)
-    except (TypeError, ValueError) as error:
-        raise BriefError(502, "The local model returned text that is not the requested JSON. Try again.") from error
-    if not isinstance(data, dict):
-        raise BriefError(502, "The local model returned an unexpected structure. Try again.")
+    except (TypeError, ValueError, RecursionError) as error:
+        raise ModelError(502, "The local model returned text that is not the requested JSON. Try again.") from error
+    if (not isinstance(data, dict) or set(data) != {"overview", "review"}
+            or any(not isinstance(data.get(key), list) for key in ("overview", "review"))):
+        raise ModelError(502, "The local model returned an unexpected structure. Try again.")
     by_id = {fact["id"]: fact for fact in facts}
     withheld = 0
     sections = {}
@@ -241,114 +236,87 @@ def check_statements(text, facts):
         items = data.get(section)
         for item in items if isinstance(items, list) else []:
             if len(kept) == limit:
-                break
-            if not isinstance(item, dict) or not isinstance(item.get("statement"), str):
+                withheld += 1
+                continue
+            if (not isinstance(item, dict) or set(item) != {"statement", "facts"}
+                    or not isinstance(item.get("statement"), str) or len(item["statement"]) > STATEMENT_CHARS):
                 withheld += 1
                 continue
             statement = clean(item["statement"], STATEMENT_CHARS)
             cited = item.get("facts") if isinstance(item.get("facts"), list) else []
-            ids = list(dict.fromkeys(value for value in cited if isinstance(value, str) and value in by_id))
+            if any(not isinstance(value, str) or value not in by_id for value in cited):
+                withheld += 1
+                continue
+            ids = list(dict.fromkeys(cited))
             if not statement or not ids:
                 withheld += 1
                 continue
             supported = set().union(*(numbers(by_id[value]["text"]) for value in ids))
-            stated = numbers(re.sub(r"\bF\d+\b", " ", statement))
-            kept.append({"text": statement, "facts": ids, "numbers_match": stated <= supported})
+            stated = numbers(re.sub(r"\b[FG]\d+\b", " ", statement))
+            if not stated <= supported:
+                withheld += 1
+                continue
+            kept.append({"text": statement, "facts": ids, "verification": "unverified"})
         sections[section] = kept
     if not sections["overview"] and not sections["review"]:
-        raise BriefError(502, "The local model produced no statement tied to the fact sheet. Try again.")
+        raise ModelError(502, f"The local model produced no statement that passed the mechanical checks; {withheld} withheld. Try again.")
     return sections["overview"], sections["review"], withheld
 
 
-class NoRedirects(urllib.request.HTTPRedirectHandler):
-    """A redirect could send the fact sheet to another host; refuse instead of following."""
+def select_facts(settings, facts, request_parts):
+    """Reserve case/scope, then source identities with their coverage, then details.
 
-    def redirect_request(self, *args, **kwargs):
-        return None
+    request_parts includes system instructions, history, question and schema so
+    their UTF-8 bytes count too. Stop each pass at the first item that does not fit.
+    A source's identity and coverage notes are indivisible so its aggregates can
+    never be sent without its saved limitations. Full facts remain available locally.
+    """
+    selected = [fact for fact in facts if fact["kind"] in ("case", "scope")]
+    source_notes = {}
+    for fact in facts:
+        if fact["kind"] in ("source", "coverage", "source_scope"):
+            source_notes.setdefault(fact["source_id"], []).append(fact)
+    limit = local_model.input_limit(settings) - 512  # reserve for the omission notice
 
+    def size(items):
+        messages, schema = request_parts(items, "")
+        return len(local_model.encoded({"messages": messages, "format": schema}))
 
-def call(base_url, path, payload=None, timeout=STATUS_TIMEOUT):
-    """JSON request to the model server on this machine. Never uses a proxy or follows redirects."""
-    if not loopback_http_url(base_url):
-        raise BriefError(503, "The model server address is not on this machine.")
-    request = urllib.request.Request(
-        base_url.rstrip("/") + path, method="GET" if payload is None else "POST",
-        data=None if payload is None else json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"})
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirects)
-    try:
-        with opener.open(request, timeout=timeout) as response:
-            body = response.read(RESPONSE_BYTES + 1)
-    except urllib.error.HTTPError as error:
-        detail = clean(error.read(2048).decode("utf-8", "replace"), 200)
-        raise BriefError(502, f"The local model server answered with an error ({error.code}): {detail}",
-                         upstream=error.code) from error
-    except http.client.HTTPException as error:
-        raise BriefError(502, "The local model server closed the connection before finishing its reply.") from error
-    except TimeoutError as error:
-        raise BriefError(504, f"The local model did not answer within {timeout} seconds.") from error
-    except OSError as error:
-        if isinstance(getattr(error, "reason", None), TimeoutError):
-            raise BriefError(504, f"The local model did not answer within {timeout} seconds.") from error
-        raise BriefError(503, "No local model server is answering on this machine. "
-                              "Start Ollama, then try again.") from error
-    if len(body) > RESPONSE_BYTES:
-        raise BriefError(502, "The local model server sent more data than CDS accepts.")
-    try:
-        data = json.loads(body)
-    except ValueError as error:
-        raise BriefError(502, "The local model server sent a reply that is not JSON.") from error
-    if not isinstance(data, dict):
-        raise BriefError(502, "The local model server sent an unexpected reply.")
-    return data
-
-
-def status(settings):
-    """Whether a brief can be generated now, and the reason when it cannot."""
-    result = {"available": False, "model": settings.ai_model, "endpoint": settings.ai_url, "reason": None}
-    try:
-        models = call(settings.ai_url, "/api/tags").get("models")
-    except BriefError as error:
-        result["reason"] = str(error)
-        return result
-    wanted = {settings.ai_model} | ({settings.ai_model + ":latest"} if ":" not in settings.ai_model else set())
-    entry = next((item for item in models if isinstance(item, dict)
-                  and (item.get("name") in wanted or item.get("model") in wanted)), None) if isinstance(models, list) else None
-    if entry is None:
-        result["reason"] = (f"The model {settings.ai_model} is not installed. "
-                            f"Run: ollama pull {settings.ai_model}")
-    elif entry.get("remote_host") or entry.get("remote_model") or settings.ai_model.endswith(("-cloud", ":cloud")):
-        # Ollama can list models that run on a remote service. Facts must stay here.
-        result["reason"] = (f"{settings.ai_model} runs on a remote service, not on this machine. "
-                            "CDS only uses a model that runs locally.")
-    else:
-        result["available"] = True
-    return result
+    if size(selected) > limit:
+        raise ModelError(422, "The question and history leave no room for case scope. Clear the conversation or shorten the question.")
+    for notes in source_notes.values():
+        if len(selected) + len(notes) > MAX_FACTS or size([*selected, *notes]) > limit:
+            break
+        selected.extend(notes)
+    sent_sources = {fact["source_id"] for fact in selected if fact.get("source_id")}
+    for fact in facts:
+        if (fact["kind"] in ("case", "scope", "source", "coverage", "source_scope")
+                or fact.get("source_id") not in sent_sources):
+            continue
+        if len(selected) >= MAX_FACTS or size([*selected, fact]) > limit:
+            break
+        selected.append(fact)
+    selected_ids = {fact["id"] for fact in selected}
+    selected = [fact for fact in facts if fact["id"] in selected_ids]
+    sources = {fact["source_id"] for fact in facts if fact.get("source_id")}
+    sent_sources = {fact["source_id"] for fact in selected if fact.get("source_id")}
+    omitted_detail_sources = {fact["source_id"] for fact in facts if fact.get("source_id") in sent_sources
+                              and fact["id"] not in selected_ids}
+    omitted = len(facts) - len(selected)
+    notice = (f"Model context: {len(selected)} of {len(facts)} computed facts included; {omitted} facts omitted; "
+              f"{len(sources - sent_sources)} sources not included; {len(omitted_detail_sources)} included sources "
+              "have omitted detail. No conversation messages were omitted. The full computed sheet is available in Case brief.")
+    return selected, {"facts_total": len(facts), "facts_sent": len(selected), "facts_omitted": omitted,
+                      "sources_omitted": len(sources - sent_sources), "notice": notice}
 
 
 def generate(settings, facts):
-    """Ask the local model to phrase the fact sheet; returns checked statements and run details."""
-    state = status(settings)
-    if not state["available"]:
-        raise BriefError(503, state["reason"])
-    started = time.monotonic()
-    payload = {
-        "model": settings.ai_model, "stream": False, "format": response_schema(facts),
-        "messages": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": build_prompt(facts)}],
-        "options": {"temperature": 0, "seed": 0, "num_ctx": 8192, "num_predict": 900}}
-    try:
-        reply = call(settings.ai_url, "/api/chat", payload, settings.ai_timeout)
-    except BriefError as error:
-        if error.upstream != 400:
-            raise
-        # A model server that rejects the schema can still be asked for plain JSON.
-        # The reply is checked against the fact sheet either way.
-        reply = call(settings.ai_url, "/api/chat", {**payload, "format": "json"}, settings.ai_timeout)
-    message = reply.get("message")
-    content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str) or not content.strip():
-        raise BriefError(502, "The local model returned an empty reply. Try again.")
-    overview, review, withheld = check_statements(content, facts)
-    return {"model": settings.ai_model, "generated_at": datetime.now(timezone.utc).isoformat(),
-            "duration_ms": int((time.monotonic() - started) * 1000),
+    def request_parts(selected, notice):
+        return ([{"role": "system", "content": SYSTEM_PROMPT},
+                 {"role": "user", "content": build_prompt(selected) + "\n" + notice}], response_schema(selected))
+
+    selected, limits = select_facts(settings, facts, request_parts)
+    content, metadata = local_model.chat(settings, *request_parts(selected, limits["notice"]))
+    overview, review, withheld = check_statements(content, selected)
+    return {**metadata, "context": {**metadata["context"], **limits}, "verification": "unverified",
             "overview": overview, "review": review, "withheld": withheld}

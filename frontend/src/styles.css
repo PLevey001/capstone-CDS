@@ -1928,3 +1928,46 @@ label > select {
 .artifact-detail code {
   overflow-wrap: anywhere;
 }
+
+.learn-panel form {
+  display: grid;
+  gap: 10px;
+}
+.learn-panel textarea {
+  width: 100%;
+  resize: vertical;
+}
+.learn-panel label {
+  display: grid;
+  gap: 8px;
+}
+.learn-panel select {
+  max-width: 440px;
+}
+.learn-turn {
+  border-bottom: 1px solid #e4e9ef;
+  padding: 12px 0;
+}
+.learn-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.learn-panel details {
+  margin: 8px 0;
+}
+.learn-panel summary {
+  cursor: pointer;
+}
+.learn-panel .brief-citations {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.learn-reference {
+  flex-basis: 100%;
+  border-left: 3px solid #d5e6e0;
+  padding: 8px 12px;
+  font-size: 13px;
+  line-height: 1.65;
+  color: #546a7b;
+  overflow-wrap: anywhere;
+}

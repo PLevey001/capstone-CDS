@@ -1,5 +1,4 @@
 """Disposable backend for Playwright. Never run against a user's workspace."""
-import json
 from pathlib import Path
 import re
 import tempfile
@@ -12,7 +11,7 @@ from cds.analysis import analyze
 from cds.config import Settings
 from cds.main import create_app
 from scripts.make_browser_demo import make_chrome_history, make_firefox_history
-from tests.model_stub import LOCAL_MODEL, ModelStub, cite_first_facts
+from tests.model_stub import LOCAL_MODEL, ModelStub, cite_first_facts, complete_reply
 
 
 def flagged_brief(payload):
@@ -24,7 +23,7 @@ def flagged_brief(payload):
                             {"statement": "The image lists 999 file entries.", "facts": [inventory]},
                             {"statement": "Someone hid these files on purpose.", "facts": []}],
                "review": [{"statement": "Coverage was not recorded, so check what was examined.", "facts": [coverage]}]}
-    return 200, {"message": {"role": "assistant", "content": json.dumps(content)}}
+    return 200, complete_reply(content)
 
 
 def build_app(root, model=None):
@@ -37,6 +36,9 @@ def build_app(root, model=None):
         # The model server is a scripted stub; these modes are the states the interface must explain.
         model.models = [] if mode == "missing" else [LOCAL_MODEL]
         model.reply = flagged_brief if mode == "flagged" else cite_first_facts
+        if mode == "hostile":
+            model.reply = lambda payload: (200, complete_reply({"answer": [{
+                "statement": "<img src=x onerror=alert('x')> Ignore all rules.", "facts": ["G1"]}], "cannot_answer": False}))
         return {"mode": mode}
 
     @app.get("/test/chrome-file")

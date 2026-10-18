@@ -501,10 +501,11 @@ class Store:
                     "total": total, "events": events}
 
     def brief_inputs(self, case_id, deleted_limit=5, top_limit=5):
-        """Bounded aggregates of the latest saved results, for the case brief fact sheet.
+        """Aggregates of the latest saved results, for the case brief fact sheet.
 
         Everything here is counted or read from saved rows; nothing is inferred.
         Itemized lists are capped and report how many entries they left out.
+        Source traversal, saved-row scans and the host tally still grow with case size.
         """
         with self.connect() as db:
             db.execute("BEGIN")
@@ -513,15 +514,16 @@ class Store:
                 return None
             sources = []
             for row in db.execute("""SELECT e.id,e.name,e.kind,e.size,e.imported_at,e.result_run_id AS run_id,
-                    j.status AS job_status,r.sequence AS run_number,r.status AS run_status,r.sha256,
+                    j.status AS job_status,j.active_run_id,r.sequence AS run_number,r.status AS run_status,r.sha256,
                     r.coverage,r.warnings,r.error
                 FROM evidence e JOIN jobs j ON j.evidence_id=e.id
                 LEFT JOIN analysis_runs r ON r.id=e.result_run_id
-                WHERE e.case_id=? ORDER BY e.imported_at,e.id""", (case_id,)).fetchall():
+                WHERE e.case_id=? ORDER BY e.imported_at,e.id""", (case_id,)):
                 source = self.decode(row)
                 owner = (source["id"], source["run_id"])
                 source.update(files=0, directories=0, deleted_total=0, deleted=[], first_file_time=None,
-                              last_file_time=None, records=[], hosts=[], host_total=0, events=[])
+                              last_file_time=None, records=[], hosts=[], host_total=0,
+                              host_omissions={"truncated": 0, "missing": 0, "unclassifiable": 0}, events=[])
                 if source["run_id"] is None:
                     sources.append(source)
                     continue
@@ -538,10 +540,12 @@ class Store:
                     (*owner, deleted_limit))]
                 stamps = []
                 for name in ("accessed", "modified", "metadata_changed", "created"):
-                    # Zero means unavailable; non-integer values are not timestamps.
+                    # Zero means unavailable. Filter to UTC years 1..9999 before extrema;
+                    # invalid extremes must not conceal valid dates, including pre-1970.
                     value = f"json_extract(details,'$.timestamps_unix.{name}')"
                     low, high = db.execute(f"""SELECT MIN({value}),MAX({value}) FROM artifacts
-                        WHERE evidence_id=? AND run_id=? AND typeof({value})='integer' AND {value}>0""", owner).fetchone()
+                        WHERE evidence_id=? AND run_id=? AND typeof({value})='integer' AND {value}!=0
+                        AND {value} BETWEEN -62135596800 AND 253402300799""", owner).fetchone()
                     stamps.extend(item for item in (low, high) if item is not None)
                 for name, unix in (("first_file_time", min(stamps, default=None)),
                                    ("last_file_time", max(stamps, default=None))):
@@ -558,14 +562,23 @@ class Store:
                         record[name] = timestamps.from_microseconds(value) if value is not None else None
                     source["records"].append(record)
                 hosts = {}
-                for (url,) in db.execute("""SELECT json_extract(details,'$.url') FROM parsed_records
+                for url, truncated in db.execute("""SELECT json_extract(details,'$.url'),
+                        json_extract(details,'$.truncated_fields') FROM parsed_records
                     WHERE evidence_id=? AND run_id=? AND kind='browser_visit'""", owner):
+                    if truncated and "url" in json.loads(truncated):
+                        source["host_omissions"]["truncated"] += 1
+                        continue
+                    if url is None or url == "":
+                        source["host_omissions"]["missing"] += 1
+                        continue
                     try:
                         host = urllib.parse.urlsplit(url).hostname if isinstance(url, str) else None
                     except ValueError:
                         host = None
                     if host:
                         hosts[host] = hosts.get(host, 0) + 1
+                    else:
+                        source["host_omissions"]["unclassifiable"] += 1
                 source["host_total"] = len(hosts)
                 source["hosts"] = sorted(hosts.items(), key=lambda item: (-item[1], item[0]))[:top_limit]
                 source["events"] = [tuple(item) for item in db.execute("""SELECT summary,COUNT(*) FROM parsed_records

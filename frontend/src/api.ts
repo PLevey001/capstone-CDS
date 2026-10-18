@@ -165,7 +165,7 @@ export type BriefFact = {
 export type BriefStatement = {
   text: string;
   facts: string[];
-  numbers_match: boolean;
+  verification: "unverified";
 };
 export type FactSheet = {
   saved_sources: number;
@@ -179,6 +179,29 @@ export type CaseBrief = FactSheet & {
   overview: BriefStatement[];
   review: BriefStatement[];
   withheld: number;
+  context: AiContext;
+};
+export type AiContext = {
+  input_bytes: number;
+  input_limit_bytes: number;
+  context_tokens: number;
+  output_tokens: number;
+  facts_sent: number;
+  facts_total: number;
+  facts_omitted: number;
+  history_omitted: number;
+  notice: string;
+};
+export type ChatAnswer = {
+  mode: "concepts" | "case";
+  answer: BriefStatement[];
+  uncertainty: string | null;
+  withheld: number;
+  model: string;
+  facts: BriefFact[];
+  facts_digest: string | null;
+  context: AiContext;
+  glossary: { id: string; title: string; text: string; url: string }[];
 };
 export type AiStatus = {
   available: boolean;

@@ -8,12 +8,21 @@ LOCAL_MODEL = {"name": "llama3.2:3b", "model": "llama3.2:3b", "size": 2019393189
                "details": {"format": "gguf", "parameter_size": "3.2B"}}
 
 
+def complete_reply(content, model="llama3.2:3b"):
+    return {"model": model, "done": True, "done_reason": "stop",
+            "message": {"role": "assistant", "content": json.dumps(content) if not isinstance(content, str) else content}}
+
+
 def cite_first_facts(payload):
     """Default reply: one overview statement per leading fact, then one review item."""
+    if "answer" in payload["format"].get("properties", {}):
+        concepts = "CONCEPT MODE" in payload["messages"][0]["content"]
+        return 200, complete_reply({"answer": [{"statement": "Scripted general explanation." if concepts else "Scripted case observation.",
+                                             "facts": ["G1" if concepts else "F1"]}], "cannot_answer": False})
     ids = re.findall(r"^(F\d+): ", payload["messages"][-1]["content"], re.MULTILINE)
     overview = [{"statement": f"Scripted overview statement about {fact}.", "facts": [fact]} for fact in ids[:2]]
     review = [{"statement": "Scripted review item.", "facts": ids[-1:]}]
-    return 200, {"message": {"role": "assistant", "content": json.dumps({"overview": overview, "review": review})}}
+    return 200, complete_reply({"overview": overview, "review": review})
 
 
 class ModelStub:
@@ -23,6 +32,8 @@ class ModelStub:
         self.reply = reply
         self.models = list(models)
         self.requests = []
+        self.shows = []
+        self.show = {"details": {"format": "gguf"}, "capabilities": ["completion"]}
         self.gets = []
         stub = self
 
@@ -49,6 +60,10 @@ class ModelStub:
 
             def do_POST(self):
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == "/api/show":
+                    stub.shows.append(payload)
+                    self.send_json(200, stub.show)
+                    return
                 stub.requests.append({"path": self.path, "payload": payload})
                 result = stub.reply(payload)
                 try:
