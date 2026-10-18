@@ -12,7 +12,9 @@ from datetime import datetime, timezone
 from cds import local_model
 from cds.local_model import ModelError
 
-MAX_FACTS = 60
+# The UTF-8 context budget remains the primary bound. This secondary cap must
+# allow a multi-source case to retain its mandatory coverage notes.
+MAX_FACTS = 160
 FACT_TEXT_CHARS = 120
 STATEMENT_CHARS = 400
 MAX_OVERVIEW = 5

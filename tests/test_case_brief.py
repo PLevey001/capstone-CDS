@@ -155,9 +155,9 @@ def test_full_sheet_keeps_all_sources_and_distinguishes_unmeasured_inventory(tmp
                 "deleted": [{"id": index, "path": f"/d{index}", "size": 1} for index in range(extra)],
                 "first_file_time": None, "last_file_time": None, "records": [], "hosts": [], "host_total": 0, "events": []}
 
-    facts = case_brief.build_facts({"case": {"name": "Large"}, "sources": [source(number, 5) for number in range(20)]})
+    facts = case_brief.build_facts({"case": {"name": "Large"}, "sources": [source(number, 5) for number in range(30)]})
     assert len(facts) > case_brief.MAX_FACTS
-    assert sum(fact["kind"] == "source" for fact in facts) == 20
+    assert sum(fact["kind"] == "source" for fact in facts) == 30
     assert facts[-1]["text"] == case_brief.SCOPE_NOTE
     failed = source(0, 0) | {"error": "ValueError: unreadable", "coverage": None}
     assert [fact["text"] for fact in case_brief.source_facts(failed)[1:3]] == [
