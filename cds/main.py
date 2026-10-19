@@ -1,5 +1,6 @@
 import asyncio
 import csv
+import hashlib
 import io
 import json
 import os
@@ -25,7 +26,7 @@ from cds.analysis import ToolLimitError, extract_artifact
 from cds.config import Settings
 from cds.coordinator import Coordinator
 from cds.instance_lock import InstanceLock
-from cds.store import CaseBusyError, Store
+from cds.store import CaseBusyError, Store, serialize_brief
 
 
 def safe_filename(name):
@@ -347,14 +348,7 @@ def create_app(settings=None, start_workers=True):
         inputs = store.brief_inputs(case_id)
         if inputs is None:
             raise HTTPException(404, "Case not found")
-        facts = case_brief.build_facts(inputs)
-        saved = sum(1 for source in inputs["sources"] if source["run_id"] is not None)
-        return {"case": inputs["case"], "saved_sources": saved, "facts": facts,
-                "facts_digest": case_brief.digest(facts),
-                "provenance": {"case_id": case_id, "case_name": inputs["case"]["name"],
-                               "sources": [{key: source.get(key) for key in
-                                            ("id", "run_id", "active_run_id", "job_status", "run_status")}
-                                           for source in inputs["sources"]]}}
+        return case_brief.fact_sheet(inputs)
 
     @app.get("/api/ai/status")
     def ai_status():
@@ -366,14 +360,38 @@ def create_app(settings=None, start_workers=True):
         """Fact sheet computed from the latest saved results. No model is involved."""
         return fact_sheet(case_id)
 
+    def brief_envelope(case_id, brief_id):
+        saved = store.saved_brief(case_id, brief_id)
+        if saved is None:
+            raise HTTPException(404, "Saved brief not found in this case")
+        return saved
+
+    @app.get("/api/cases/{case_id}/briefs")
+    def brief_history(case_id: str):
+        history = store.saved_briefs(case_id)
+        if history is None:
+            raise HTTPException(404, "Case not found")
+        return history
+
+    @app.get("/api/cases/{case_id}/briefs/{brief_id}")
+    def saved_brief(case_id: str, brief_id: str):
+        saved = brief_envelope(case_id, brief_id)
+        saved.pop("serialized")
+        return saved
+
+    @app.get("/api/cases/{case_id}/briefs/{brief_id}/download")
+    def download_brief(case_id: str, brief_id: str):
+        saved = brief_envelope(case_id, brief_id)
+        document = saved["document"]
+        # Generated ID/version only: case names and client paths never determine a download path.
+        filename = f"case-brief-{document['id']}-v{document['version']}.json"
+        return Response(saved["serialized"], media_type="application/json",
+                        headers={"Content-Disposition": download_disposition(filename),
+                                 "ETag": f'"{saved["document_sha256"]}"'})
+
     @app.post("/api/cases/{case_id}/brief")
     def brief(case_id: str):
-        """Fact sheet plus wording from a model on this machine.
-
-        The model receives only the fact sheet. A statement is returned only if it
-        cites only real facts and has no numeric mismatch; meaning remains unverified.
-        The wording is not saved; the activity log records that it was generated.
-        """
+        """Generate and transactionally save an immutable assessment; return its envelope."""
         sheet = fact_sheet(case_id)
         if not sheet["saved_sources"]:
             raise HTTPException(409, "There are no saved analysis results to summarize yet.")
@@ -381,18 +399,15 @@ def create_app(settings=None, start_workers=True):
             raise HTTPException(409, "A local AI answer is already being generated. Wait for it to finish.")
         try:
             result = case_brief.generate(settings, sheet["facts"])
-            if fact_sheet(case_id)["facts_digest"] != sheet["facts_digest"]:
-                raise HTTPException(409, "Case results changed during generation. Generate again.")
+            document = store.save_brief(sheet, result)
+            # Fresh at the validated save transaction; subsequent changes are checked on reads.
+            # Do not let another database read turn a committed save into a failed POST.
+            return {"document": document, "stale": False,
+                    "document_sha256": hashlib.sha256(serialize_brief(document).encode("utf-8")).hexdigest()}
         except local_model.ModelError as error:
             raise HTTPException(error.status, str(error)) from error
         finally:
             generation_slot.release()
-        shown = len(result["overview"]) + len(result["review"])
-        store.record_event(case_id, "case_brief_generated",
-                           f"Model {result['model']} worded {shown} statements from {result['context']['facts_sent']} facts sent; "
-                           f"{result['context']['facts_omitted']} facts omitted "
-                           f"(fact sheet {sheet['facts_digest'][:12]}); {result['withheld']} withheld")
-        return {**sheet, **result}
 
     @app.get("/api/ai/glossary")
     def glossary():
@@ -406,9 +421,15 @@ def create_app(settings=None, start_workers=True):
             sheet = fact_sheet(case_id) if question.mode == "case" else None
             if sheet and question.facts_digest and question.facts_digest != sheet["facts_digest"]:
                 raise HTTPException(409, "Case facts changed or belong to another case. Clear the conversation and try again.")
-            result = learning.generate(settings, question, sheet)
+            assessment = None
+            if question.brief_id:
+                selected = brief_envelope(case_id, question.brief_id)
+                if selected["stale"] or selected["document"]["input_digest"] != sheet["input_digest"]:
+                    raise HTTPException(409, "Selected AI brief is stale. Regenerate or select a current version; clear the conversation. Viewing and downloading remain available.")
+                assessment = selected["document"]
+            result = learning.generate(settings, question, sheet, assessment)
             require_case(case_id)
-            if sheet and fact_sheet(case_id)["facts_digest"] != sheet["facts_digest"]:
+            if sheet and fact_sheet(case_id)["input_digest"] != sheet["input_digest"]:
                 raise HTTPException(409, "Case results changed during generation. Clear the conversation and try again.")
             # Chat text and references are never written to the audit log or Store.
             return result

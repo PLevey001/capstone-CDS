@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, LoaderCircle, Sparkles } from "lucide-react";
-import { api, type AiStatus, type BriefFact, type ChatAnswer } from "../api";
+import {
+  api,
+  type AiStatus,
+  type BriefFact,
+  type BriefVersion,
+  type ChatAnswer,
+} from "../api";
 
 type Turn = { question: string; result: ChatAnswer };
 type GlossaryEntry = ChatAnswer["glossary"][number];
@@ -12,6 +18,9 @@ export default function LearnPanel({
   caseId: string;
   onSelect: (fact: BriefFact) => void;
 }) {
+  const [briefId, setBriefId] = useState("");
+  const [briefs, setBriefs] = useState<BriefVersion[]>([]);
+  const [briefError, setBriefError] = useState("");
   const [mode, setMode] = useState<"concepts" | "case">("concepts");
   const [question, setQuestion] = useState("");
   const [turns, setTurns] = useState<Turn[]>([]);
@@ -56,6 +65,20 @@ export default function LearnPanel({
     return () => controller.abort();
   }, [glossaryAttempt]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    api<BriefVersion[]>(`/cases/${caseId}/briefs`, {
+      signal: controller.signal,
+    })
+      .then((value) => {
+        if (!controller.signal.aborted) setBriefs(value);
+      })
+      .catch((failure) => {
+        if (!controller.signal.aborted) setBriefError(failure.message);
+      });
+    return () => controller.abort();
+  }, [caseId]);
+
   useEffect(() => () => pending.current?.abort(), []);
 
   function clear() {
@@ -89,6 +112,7 @@ export default function LearnPanel({
         body: JSON.stringify({
           mode,
           message: question,
+          brief_id: mode === "case" ? briefId || null : null,
           history,
           facts_digest:
             mode === "case"
@@ -166,6 +190,35 @@ export default function LearnPanel({
             <option value="case">Ask about this case · saved facts only</option>
           </select>
         </label>
+        {mode === "case" && (
+          <label>
+            Assessment for this conversation
+            <select
+              aria-label="Assessment for this conversation"
+              value={briefId}
+              onChange={(event) => {
+                clear();
+                setBriefId(event.target.value);
+              }}
+            >
+              <option value="">No saved brief · fresh facts only</option>
+              {briefs.map((brief) => (
+                <option key={brief.id} value={brief.id} disabled={brief.stale}>
+                  Saved brief version {brief.version}
+                  {brief.stale ? " · stale, regenerate first" : ""}
+                </option>
+              ))}
+            </select>
+            {briefError && <span role="alert">{briefError}</span>}
+            {briefId && (
+              <p>
+                Selected brief version{" "}
+                {briefs.find((brief) => brief.id === briefId)?.version} · prior
+                unverified assessment, not evidence.
+              </p>
+            )}
+          </label>
+        )}
         <p className="brief-intro">
           {mode === "concepts"
             ? "General educational explanation. No case has been examined in this mode; user descriptions are not verified observations."
@@ -201,9 +254,7 @@ export default function LearnPanel({
             <h4>You</h4>
             <p className="learn-text">{turn.question}</p>
             <h4>
-              {mode === "concepts"
-                ? "General explanation"
-                : "Case observations"}{" "}
+              {mode === "concepts" ? "General explanation" : "Case discussion"}{" "}
               · unverified AI
             </h4>
             {turn.result.uncertainty && <p>{turn.result.uncertainty}</p>}
@@ -216,6 +267,55 @@ export default function LearnPanel({
                     const fact = turn.result.facts.find(
                       (entry) => entry.id === id,
                     );
+                    const assessment = turn.result.assessment_items?.find(
+                      (entry) => entry.id === id,
+                    );
+                    if (assessment)
+                      return (
+                        <details
+                          key={id}
+                          className="learn-assessment-reference"
+                        >
+                          <summary>Prior unverified assessment · {id}</summary>
+                          <p>
+                            Saved brief version{" "}
+                            {turn.result.selected_brief?.version} ·{" "}
+                            {assessment.category} · not evidence
+                          </p>
+                          <p>{assessment.text}</p>
+                          {assessment.reasoning && (
+                            <p>Reasoning: {assessment.reasoning}</p>
+                          )}
+                          {assessment.alternatives?.map((text, i) => (
+                            <p key={`alt-${i}`}>Alternative: {text}</p>
+                          ))}
+                          {assessment.limitations?.map((text, i) => (
+                            <p key={`limit-${i}`}>Limitation: {text}</p>
+                          ))}
+                          <strong>Supporting historical evidence facts</strong>
+                          {assessment.facts.map((ref) => {
+                            const support = turn.result.facts.find(
+                              (entry) => entry.id === ref,
+                            );
+                            return (
+                              <div key={ref}>
+                                <p>
+                                  {ref}: {support?.text}
+                                </p>
+                                {support?.source_id && (
+                                  <button
+                                    className="secondary-button"
+                                    onClick={() => onSelect(support)}
+                                    aria-label={`Open supporting source for ${ref}`}
+                                  >
+                                    Open pinned saved run
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </details>
+                      );
                     const lesson = turn.result.glossary.find(
                       (entry) => entry.id === id,
                     );
@@ -232,7 +332,7 @@ export default function LearnPanel({
                     }
                     return (
                       <details key={id}>
-                        <summary>{id}</summary>
+                        <summary>Evidence fact · {id}</summary>
                         <p>{fact?.text}</p>
                         {fact?.source_id && (
                           <button

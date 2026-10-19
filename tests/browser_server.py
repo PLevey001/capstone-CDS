@@ -11,7 +11,7 @@ from cds.analysis import analyze
 from cds.config import Settings
 from cds.main import create_app
 from scripts.make_browser_demo import make_chrome_history, make_firefox_history
-from tests.model_stub import LOCAL_MODEL, ModelStub, cite_first_facts, complete_reply
+from tests.model_stub import LOCAL_MODEL, ModelStub, assessment, cite_first_facts, complete_reply
 
 
 def flagged_brief(payload):
@@ -19,10 +19,10 @@ def flagged_brief(payload):
     facts = dict(re.findall(r"^(F\d+): (.*)$", payload["messages"][-1]["content"], re.MULTILINE))
     inventory = next(fact for fact, text in facts.items() if text.startswith("The inventory of"))
     coverage = next(fact for fact, text in facts.items() if text.startswith("Coverage for"))
-    content = {"overview": [{"statement": "The case holds one analyzed disk image.", "facts": ["F1", "F2"]},
-                            {"statement": "The image lists 999 file entries.", "facts": [inventory]},
-                            {"statement": "Someone hid these files on purpose.", "facts": []}],
-               "review": [{"statement": "Coverage was not recorded, so check what was examined.", "facts": [coverage]}]}
+    content = assessment("The case holds one analyzed disk image.")
+    content["observations"] = [{"statement": "The image lists 999 file entries.", "facts": [inventory]},
+                               {"statement": "Someone hid these files on purpose.", "facts": []}]
+    content["review_next"] = [{"statement": "Coverage was not recorded, so check what was examined.", "facts": [coverage]}]
     return 200, complete_reply(content)
 
 

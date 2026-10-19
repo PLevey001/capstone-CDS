@@ -15,7 +15,7 @@ from cds.store import Store
 from cds.history_records import SNAPSHOT_SCOPE
 from cds.registry_records import SCOPE as REGISTRY_SCOPE
 from cds.evtx_records import SCOPE as EVTX_SCOPE
-from tests.model_stub import LOCAL_MODEL, complete_reply
+from tests.model_stub import LOCAL_MODEL, assessment, complete_reply
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def model(tmp_path, monkeypatch):
 
     def call(url, path, payload=None, **kwargs):
         requests.append((path, payload, kwargs))
-        return {"/api/tags": {"models": state["models"]}, "/api/show": state["show"], "/api/chat": state["reply"]}[path]
+        return {"/api/tags": {"models": state["models"]}, "/api/show": state["show"], "/api/version": {"version": "synthetic"}, "/api/chat": state["reply"]}[path]
 
     monkeypatch.setattr(local_model, "call", call)
     return Settings(tmp_path), state, requests
@@ -73,7 +73,9 @@ def test_cloud_names_rejected_before_discovery(tmp_path, name):
 def test_one_deadline_and_bounded_input_before_discovery(model):
     settings, _, requests = model
     local_model.chat(settings, [{"role": "user", "content": "hi"}], {})
-    assert len({kwargs["deadline"] for _, _, kwargs in requests}) == 1
+    deadlines = {kwargs["deadline"] for path, _, kwargs in requests if path != "/api/version"}
+    assert len(deadlines) == 1
+    assert next(kwargs["deadline"] for path, _, kwargs in requests if path == "/api/version") <= next(iter(deadlines))
     requests.clear()
     with pytest.raises(local_model.ModelError) as error:
         local_model.chat(settings, [{"role": "user", "content": "界" * 3000}], {})
@@ -351,8 +353,7 @@ def test_complete_coverage_retains_source_scope_details_and_warning_in_model(mod
     assert all(fact["run_id"] == run and fact["source_id"] == "synthetic-source" for fact in notes)
     text = " ".join(fact["text"] for fact in notes)
     assert scope in text and detail in text and warning in text
-    state["reply"] = complete_reply({"overview": [{"statement": "Review saved scope.", "facts": [notes[0]["id"]]}],
-                                      "review": []})
+    state["reply"] = complete_reply(assessment("Review saved scope.", notes[0]["id"]))
     case_brief.generate(settings, facts)
     prompt = requests[-1][1]["messages"][1]["content"]
     assert scope in prompt and detail in prompt and warning in prompt
@@ -405,16 +406,15 @@ def test_brief_endpoint_hostile_numeric_scope_and_audit_omissions(model, monkeyp
                 and "POST" in route.methods)
     facts = get(case)["facts"]
     scope = next(fact for fact in facts if fact["kind"] == "source_scope")
-    state["reply"] = complete_reply({"overview": [{"statement": "Review this saved scope.", "facts": [scope["id"]]}],
-                                      "review": []})
+    state["reply"] = complete_reply(assessment("Review this saved scope.", scope["id"]))
     monkeypatch.setattr(case_brief, "MAX_FACTS", 4)
-    result = post(case)
-    assert result["overview"][0]["verification"] == "unverified"
+    result = post(case)["document"]
+    assert result["overall_summary"][0]["verification"] == "unverified"
     assert result["facts_digest"] == case_brief.digest(facts)
     assert result["context"]["facts_sent"] == 4 and result["context"]["facts_omitted"] == 1
     audit = app.state.store.audit(case)[0]["detail"]
     assert "from 4 facts sent; 1 facts omitted" in audit
-    assert result["facts_digest"][:12] in audit and "Review this saved scope" not in audit
+    assert result["input_digest"][:12] in audit and "Review this saved scope" not in audit
 
 
 @pytest.mark.parametrize("length", [b"\xb2", b"9" * 10000], ids=["unicode-digit", "long-digits"])

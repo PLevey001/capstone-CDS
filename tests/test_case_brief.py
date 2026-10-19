@@ -11,7 +11,7 @@ import cds.case_brief as case_brief
 from cds import local_model
 from cds.config import Settings
 from cds.main import create_app
-from tests.model_stub import LOCAL_MODEL, ModelStub, complete_reply
+from tests.model_stub import LOCAL_MODEL, ModelStub, assessment, complete_reply
 
 HEADERS = {"X-CDS-Request": "local-ui"}
 SHA = "ab12" * 16
@@ -167,47 +167,41 @@ def test_full_sheet_keeps_all_sources_and_distinguishes_unmeasured_inventory(tmp
     assert "0 file entries" in next(fact["text"] for fact in case_brief.source_facts(measured) if fact["kind"] == "inventory")
 
 
-def test_brief_shows_only_statements_that_cite_real_facts(workspace):
-    client, _, stub, (case, _, _, _) = workspace
-    facts = client.get(f"/api/cases/{case}/brief").json()["facts"]
+def test_brief_saves_only_complete_assessments_with_real_references(workspace):
+    client, store, stub, (case, _, _, _) = workspace
+    sheet = client.get(f"/api/cases/{case}/brief").json()
+    facts = sheet["facts"]
     inventory = next(fact["id"] for fact in facts if fact["kind"] == "inventory")
-    stub.reply = reply_with({
-        "overview": [
-            {"statement": "The image lists 8 file entries and 1 directory.", "facts": [inventory]},
-            {"statement": "A suspect wiped 12 files to hide evidence.", "facts": [inventory]},
-            {"statement": "Cites a fact that does not exist.", "facts": ["F999"]},
-            {"statement": "Cites nothing at all.", "facts": []},
-            "not an object",
-            {"statement": "   ", "facts": ["F1"]},
-            {"statement": f"Mentions {inventory} by ID\nand keeps one line.", "facts": [inventory, inventory, "F999", 7]},
-        ] + [{"statement": f"Extra statement {number}.", "facts": ["F1"]} for number in range(9)],
-        "review": [{"statement": "Look at the deleted entries first.", "facts": ["F1"]}],
-    })
+    valid = assessment("The image lists 8 file entries and 1 directory.", inventory)
+    stub.reply = reply_with(valid | {"observations": [{"statement": "Unsupported number 999.", "facts": [inventory]}]})
+    assert client.post(f"/api/cases/{case}/brief", headers=HEADERS).status_code == 502
+    assert store.saved_briefs(case) == []
+    stub.requests.clear()
+    stub.reply = reply_with(valid)
     response = client.post(f"/api/cases/{case}/brief", headers=HEADERS)
-    assert response.status_code == 200
-    brief = response.json()
-    assert brief["facts"] == facts and brief["model"] == "llama3.2:3b" and brief["withheld"] == 13
-    assert brief["overview"][0] == {
-        "text": "The image lists 8 file entries and 1 directory.", "facts": [inventory], "verification": "unverified"}
-    assert len(brief["overview"]) == 3
-    assert brief["review"] == [{"text": "Look at the deleted entries first.", "facts": ["F1"], "verification": "unverified"}]
-    # The model is sent the fact sheet and nothing else from the workspace.
+    assert response.status_code == 200, response.text
+    envelope = response.json()
+    brief = envelope["document"]
+    assert brief["facts"] == facts and brief["model"] == "llama3.2:3b" and brief["withheld"] == 0
+    assert brief["overall_summary"][0] == {
+        "id": "A-overall_summary-1", "text": "The image lists 8 file entries and 1 directory.",
+        "facts": [inventory], "verification": "unverified"}
+    assert brief["model_digest"] == LOCAL_MODEL["digest"] and brief["runtime_version"] == "synthetic-runtime"
+    assert brief["version"] == 1 and envelope["stale"] is False
     (request,) = stub.requests
     payload = request["payload"]
     assert request["path"] == "/api/chat" and payload["model"] == "llama3.2:3b" and payload["stream"] is False
     assert payload["options"]["temperature"] == 0
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
     assert payload["messages"][0]["content"] == case_brief.SYSTEM_PROMPT
-    assert payload["messages"][1]["content"].startswith(case_brief.build_prompt(facts))
-    assert payload["format"]["properties"]["overview"]["items"]["properties"]["facts"]["items"]["enum"] == [
-        fact["id"] for fact in facts]
+    assert payload["messages"][1]["content"].startswith(case_brief.build_prompt(brief["model_facts"]))
+    assert payload["format"]["$defs"]["item"]["properties"]["facts"]["items"]["enum"] == [
+        fact["id"] for fact in brief["model_facts"]]
     assert str(client.app.state.store.root) not in json.dumps(payload)
-    # Generating is an activity-log entry; the wording itself is not stored.
     event = client.get(f"/api/cases/{case}/audit").json()[0]
-    assert event["action"] == "case_brief_generated"
-    assert event["detail"] == (f"Model llama3.2:3b worded 4 statements from {brief['context']['facts_sent']} facts sent; "
-                               f"{brief['context']['facts_omitted']} facts omitted "
-                               f"(fact sheet {brief['facts_digest'][:12]}); 13 withheld")
+    assert event["action"] == "case_brief_saved"
+    assert brief["input_digest"] in event["detail"]
+    assert "8 file entries" not in event["detail"]  # Prose lives only in the immutable JSON row.
 
 
 @pytest.mark.parametrize("content,message", [
@@ -222,7 +216,7 @@ def test_unusable_model_replies_are_errors_not_briefs(workspace, content, messag
     stub.reply = reply_with(content)
     response = client.post(f"/api/cases/{case}/brief", headers=HEADERS)
     assert response.status_code == 502 and message in response.json()["detail"]
-    assert all(event["action"] != "case_brief_generated" for event in client.get(f"/api/cases/{case}/audit").json())
+    assert all(event["action"] != "case_brief_saved" for event in client.get(f"/api/cases/{case}/audit").json())
 
 
 def test_model_server_failures_are_reported_plainly(workspace):
@@ -329,7 +323,7 @@ def test_slow_model_times_out_and_one_brief_runs_at_a_time(tmp_path):
     def held(payload):
         started.set()
         release.wait(10)
-        return reply_with({"overview": [{"statement": "Done.", "facts": ["F1"]}], "review": []})(payload)
+        return reply_with(assessment("Done."))(payload)
 
     with ModelStub(reply=held) as stub:
         app = create_app(Settings(tmp_path / "busy", ai_url=stub.url), start_workers=False)

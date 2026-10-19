@@ -5,15 +5,16 @@ import shutil
 import sqlite3
 import threading
 import urllib.parse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
+from cds import case_brief
 import cds.artifacts as artifact_rules
 import cds.config as config
 import cds.timestamps as timestamps
-from cds.migrations import migrate_history, migrate_records
+from cds.migrations import migrate_briefs, migrate_history, migrate_records
 from cds.records import EMPTY_RECORD_PAYLOAD_BYTES, record_size
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,11 @@ class CaseBusyError(Exception):
 
 def now():
     return datetime.now(timezone.utc).isoformat()
+
+
+def serialize_brief(document):
+    """Canonical saved/downloaded JSON, also used to hash the committed POST response."""
+    return json.dumps(document, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 
 
 class Store:
@@ -88,6 +94,7 @@ class Store:
             """)
             migrate_history(db)
             migrate_records(db)
+            migrate_briefs(db)
         self.cleanup_deleted_files()
 
     @staticmethod
@@ -500,15 +507,16 @@ class Store:
             return {"case": dict(case), "revision": current_revision, "offset": offset, "limit": limit,
                     "total": total, "events": events}
 
-    def brief_inputs(self, case_id, deleted_limit=5, top_limit=5):
+    def brief_inputs(self, case_id, deleted_limit=5, top_limit=5, connection=None):
         """Aggregates of the latest saved results, for the case brief fact sheet.
 
         Everything here is counted or read from saved rows; nothing is inferred.
         Itemized lists are capped and report how many entries they left out.
         Source traversal, saved-row scans and the host tally still grow with case size.
         """
-        with self.connect() as db:
-            db.execute("BEGIN")
+        with nullcontext(connection) if connection is not None else self.connect() as db:
+            if connection is None:
+                db.execute("BEGIN")
             case = db.execute("SELECT * FROM cases WHERE id=?", (case_id,)).fetchone()
             if case is None:
                 return None
@@ -523,7 +531,7 @@ class Store:
                 owner = (source["id"], source["run_id"])
                 source.update(files=0, directories=0, deleted_total=0, deleted=[], first_file_time=None,
                               last_file_time=None, records=[], hosts=[], host_total=0,
-                              host_omissions={"truncated": 0, "missing": 0, "unclassifiable": 0}, events=[])
+                              host_omissions={"truncated": 0, "missing": 0, "unclassifiable": 0}, events=[], event_types_total=0)
                 if source["run_id"] is None:
                     sources.append(source)
                     continue
@@ -584,8 +592,58 @@ class Store:
                 source["events"] = [tuple(item) for item in db.execute("""SELECT summary,COUNT(*) FROM parsed_records
                     WHERE evidence_id=? AND run_id=? AND kind='windows_event'
                     GROUP BY summary ORDER BY COUNT(*) DESC,summary LIMIT ?""", (*owner, top_limit))]
+                source["event_types_total"] = db.execute("""SELECT COUNT(DISTINCT summary) FROM parsed_records
+                    WHERE evidence_id=? AND run_id=? AND kind='windows_event'""", owner).fetchone()[0]
                 sources.append(source)
             return {"case": dict(case), "sources": sources}
+
+    def save_brief(self, sheet, generated):
+        """Check the snapshot, assign a version, insert JSON and audit in one write transaction."""
+        case_id = sheet["case"]["id"]
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = self.brief_inputs(case_id, connection=db)
+            if current is None:
+                raise case_brief.ModelError(404, "Case was deleted during generation. No brief was saved.")
+            if case_brief.digest(current) != sheet["input_digest"]:
+                raise case_brief.ModelError(409, "Case results changed during generation. No brief was saved. Generate again.")
+            version = db.execute("SELECT COALESCE(MAX(version),0)+1 FROM case_briefs WHERE case_id=?",
+                                 (case_id,)).fetchone()[0]
+            document = {**sheet, **generated, "id": str(uuid4()), "version": version,
+                        "schema_version": case_brief.SCHEMA_VERSION}
+            serialized = serialize_brief(document)
+            db.execute("INSERT INTO case_briefs VALUES(?,?,?,?,?,?)",
+                       (document["id"], case_id, version, sheet["input_digest"], document["generated_at"], serialized))
+            self.event(db, case_id, "case_brief_saved",
+                       f"Saved AI brief v{version} ({document['id']}); model {document['model']}; "
+                       f"from {document['context']['facts_sent']} facts sent; "
+                       f"{document['context']['facts_omitted']} facts omitted; input {sheet['input_digest']}")
+        # Only return success after the context manager committed.
+        return document
+
+    def saved_briefs(self, case_id):
+        with self.connect() as db:
+            db.execute("BEGIN")
+            current = self.brief_inputs(case_id, connection=db)
+            if current is None:
+                return None
+            current_digest = case_brief.digest(current)
+            return [{"id": row["id"], "version": row["version"], "generated_at": row["created_at"],
+                     "stale": row["input_digest"] != current_digest}
+                    for row in db.execute("SELECT id,version,created_at,input_digest FROM case_briefs "
+                                          "WHERE case_id=? ORDER BY version DESC", (case_id,))]
+
+    def saved_brief(self, case_id, brief_id):
+        with self.connect() as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT * FROM case_briefs WHERE case_id=? AND id=?", (case_id, brief_id)).fetchone()
+            if row is None:
+                return None
+            current = self.brief_inputs(case_id, connection=db)
+            serialized = row["document"]
+            return {"document": json.loads(serialized), "stale": row["input_digest"] != case_brief.digest(current),
+                    "document_sha256": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+                    "serialized": serialized}
 
     def record_event(self, case_id, action, detail):
         """Append one case-level activity entry; False if the case no longer exists."""

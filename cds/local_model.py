@@ -127,12 +127,15 @@ def discover(settings, deadline):
     capabilities = details.get("capabilities", [])
     if not isinstance(capabilities, list) or "completion" not in capabilities:
         raise ModelError(503, "The configured local model does not support chat completion.")
+    installed_digest = entry.get("digest")
+    return {"model_digest": installed_digest if isinstance(installed_digest, str) and len(installed_digest) <= 256 else None}
 
 
-def status(settings):
+def status(settings, deadline=None):
     result = {"available": False, "model": settings.ai_model, "endpoint": settings.ai_url, "reason": None}
     try:
-        discover(settings, time.monotonic() + STATUS_TIMEOUT)
+        probe_deadline = time.monotonic() + STATUS_TIMEOUT
+        discover(settings, min(probe_deadline, deadline) if deadline is not None else probe_deadline)
         result["available"] = True
     except ModelError as error:
         result["reason"] = str(error)
@@ -151,7 +154,14 @@ def chat(settings, messages, schema):
     input_bytes = len(encoded({"messages": messages, "format": schema}))
     if input_bytes > input_limit(settings):
         raise ModelError(422, "Conversation exceeds the configured AI context budget. Clear it or shorten the question.")
-    discover(settings, deadline)
+    discovery = discover(settings, deadline)
+    runtime_version = None
+    try:
+        version = call(settings.ai_url, "/api/version", deadline=min(deadline, time.monotonic() + STATUS_TIMEOUT)).get("version")
+        if isinstance(version, str) and len(version) <= 100:
+            runtime_version = version
+    except ModelError:
+        pass  # Older runtimes may not expose a version; never invent one.
     reply = call(settings.ai_url, "/api/chat", {
         "model": settings.ai_model, "stream": False, "format": schema, "messages": messages,
         "options": {"temperature": 0, "seed": 0, "num_ctx": settings.ai_context, "num_predict": OUTPUT_TOKENS},
@@ -172,7 +182,11 @@ def chat(settings, messages, schema):
         raise ModelError(502, "The local model answer contained invalid Unicode.") from error
     if len(content_bytes) > OUTPUT_BYTES:
         raise ModelError(502, "The local model answer exceeded the output limit.")
-    return content, {"model": settings.ai_model, "generated_at": datetime.now(timezone.utc).isoformat(),
+    return content, {"model": settings.ai_model, **discovery, "runtime_version": runtime_version,
+                     "generation_options": {"temperature": 0, "seed": 0, "num_ctx": settings.ai_context,
+                                            "num_predict": OUTPUT_TOKENS, "timeout_seconds": settings.ai_timeout},
+                     "reproducibility": "Recorded configuration and discovery metadata do not guarantee identical output on another run.",
+                     "generated_at": datetime.now(timezone.utc).isoformat(),
                      "duration_ms": int((time.monotonic() - started) * 1000),
                      "context": {"input_bytes": input_bytes, "input_limit_bytes": input_limit(settings),
                                  "context_tokens": settings.ai_context, "output_tokens": OUTPUT_TOKENS,
