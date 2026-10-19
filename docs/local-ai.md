@@ -9,6 +9,10 @@ Every generated statement is **unverified**. Valid references and matching numbe
 
 Concept answers show the cited reviewed local text beside the generated explanation by default, using the reference snapshot returned with that answer. SHA-256 notes distinguish integrity relative to a reference from trust in that reference or software safety. Registry notes distinguish a key's last-write time from an individual value's change time. The model can still contradict these notes; visible references and warnings do not establish answer quality. Unsupported concept questions receive a reference-limitation message, without assuming the question was case-specific.
 
+## Draft model guidance
+
+The [AI guidance pack](ai-guidance/README.md) contains proposed brief/chat rules, synthetic preferred and rejected examples, and a human-review rubric. It emphasizes readable prose inside structured JSON. It is documentation only: CDS does not load these files yet, no model weights have been trained, and output/context limits are unchanged.
+
 ## Setup
 
 Install Ollama using its [official installation instructions](https://ollama.com/download). Record `ollama --version` when validating a deployment. CDS uses Ollama's [chat API](https://docs.ollama.com/api/chat) with JSON schema output and requires `done: true`, `done_reason: "stop"`, and the configured model in a complete reply. It does not retry arbitrary HTTP 400 responses or fall back to a cloud service.
