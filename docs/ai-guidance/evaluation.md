@@ -60,4 +60,4 @@ Transform approved examples into the selected trainer's format in a separate, re
 
 ## Deferred engineering issue
 
-The observed 900-token brief output stop and its interaction with the input reservation remain unresolved. This documentation change deliberately does not alter generation limits, model settings, application code or startup behavior. Address that separately with captured completion metadata and an actual end-to-end brief test.
+A later runtime integration reserves 1800 output tokens for briefs, uses a shorter file-based prompt, and retains 900 for chat. The combined synthetic case has completed and saved through the actual API with this setup. Length stops still reject incomplete replies; larger output is not a guarantee of completion or factual accuracy. Further quality evaluation remains required.

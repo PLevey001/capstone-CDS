@@ -4,9 +4,9 @@ Version: 0.1 — draft for human review.
 
 Goal: produce a case summary a person can understand, with a JSON structure a program can preserve. The JSON is the container; its prose should not read like a database dump.
 
-## Status: documentation, not runtime configuration
+## Status: reference pack with a compact runtime derivative
 
-CDS does **not** currently read this folder at startup or send these files to Ollama. Active prompts remain in `cds/case_brief.py` and `cds/learning.py`. Creating or editing these documents does not train model weights, change generation limits, or fix incomplete replies. Nothing here authorizes weakening validation or hiding missing evidence.
+CDS does **not** currently read this folder at startup or send these files to Ollama. The brief now loads a compact derivative from `cds/prompts/case-brief.txt` at process startup and records its SHA-256 and `case-assessment.v3` version. Chat still uses `cds/learning.py`. Restart CDS after editing the runtime file; the full documents and examples are not automatically concatenated into requests. Creating or editing these documents does not train model weights, change generation limits, or fix incomplete replies. Nothing here authorizes weakening validation or hiding missing evidence.
 
 This pack is a proposed behavior specification and example set. Human review comes first; prompt integration and an evaluation against the current baseline are separate changes. Actual fine-tuning would require a curated dataset, held-out evaluation, a training process and a separately versioned model. That work has not been performed.
 
@@ -27,7 +27,7 @@ The examples describe the **model response**, not a complete saved case document
 
 Chat model responses use `answer` plus `cannot_answer`. A refusal has `cannot_answer: true` and an empty `answer`; a supported answer has `cannot_answer: false`. Do not mix the two.
 
-Current limits and routes are documented in [local-ai.md](../local-ai.md). The 900-token output limit and conservative input reservation are unchanged by this documentation work. Examples must not be padded to fill allowed item counts. A transport-truncated answer must still be rejected rather than repaired into an apparently complete assessment.
+Current limits and routes are documented in [local-ai.md](../local-ai.md). Chat retains a 900-token output allowance; briefs now reserve 1800 tokens. Both remain bounded and use the same conservative input reservation policy. Examples must not be padded to fill allowed item counts. A transport-truncated answer must still be rejected rather than repaired into an apparently complete assessment.
 
 ## Sources and boundaries
 

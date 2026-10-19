@@ -15,6 +15,7 @@ REQUEST_BYTES = 128 * 1024
 OUTPUT_BYTES = 16 * 1024
 STATUS_TIMEOUT = 3
 OUTPUT_TOKENS = 900
+BRIEF_OUTPUT_TOKENS = 1800
 TEMPLATE_RESERVE = 1024
 
 
@@ -142,17 +143,17 @@ def status(settings, deadline=None):
     return result
 
 
-def input_limit(settings):
+def input_limit(settings, output_tokens=OUTPUT_TOKENS):
     # Conservative byte budget: at most one UTF-8 byte per input token, with
     # additional reserve for the chat template, schema, and output. Not a tokenizer.
-    return settings.ai_context - OUTPUT_TOKENS - TEMPLATE_RESERVE
+    return settings.ai_context - output_tokens - TEMPLATE_RESERVE
 
 
-def chat(settings, messages, schema):
+def chat(settings, messages, schema, output_tokens=OUTPUT_TOKENS):
     started = time.monotonic()
     deadline = started + settings.ai_timeout
     input_bytes = len(encoded({"messages": messages, "format": schema}))
-    if input_bytes > input_limit(settings):
+    if input_bytes > input_limit(settings, output_tokens):
         raise ModelError(422, "Conversation exceeds the configured AI context budget. Clear it or shorten the question.")
     discovery = discover(settings, deadline)
     runtime_version = None
@@ -164,10 +165,14 @@ def chat(settings, messages, schema):
         pass  # Older runtimes may not expose a version; never invent one.
     reply = call(settings.ai_url, "/api/chat", {
         "model": settings.ai_model, "stream": False, "format": schema, "messages": messages,
-        "options": {"temperature": 0, "seed": 0, "num_ctx": settings.ai_context, "num_predict": OUTPUT_TOKENS},
+        "options": {"temperature": 0, "seed": 0, "num_ctx": settings.ai_context, "num_predict": output_tokens},
     }, deadline=deadline)
+    if reply.get("done_reason") == "length":
+        raise ModelError(502, f"The local model reached its {output_tokens}-token output limit before finishing. "
+                         "No partial answer was accepted. This is a generation limit, not a connection failure.")
     if reply.get("done") is not True or reply.get("done_reason") != "stop":
-        raise ModelError(502, "The local model reply was incomplete or truncated. Try a shorter question.")
+        raise ModelError(502, "The local model reply was incomplete or had no normal completion marker. "
+                         "No partial answer was accepted.")
     if reply.get("model") not in model_names(settings.ai_model):
         raise ModelError(502, "The local model reply did not match the configured model.")
     message = reply.get("message")
@@ -184,10 +189,10 @@ def chat(settings, messages, schema):
         raise ModelError(502, "The local model answer exceeded the output limit.")
     return content, {"model": settings.ai_model, **discovery, "runtime_version": runtime_version,
                      "generation_options": {"temperature": 0, "seed": 0, "num_ctx": settings.ai_context,
-                                            "num_predict": OUTPUT_TOKENS, "timeout_seconds": settings.ai_timeout},
+                                            "num_predict": output_tokens, "timeout_seconds": settings.ai_timeout},
                      "reproducibility": "Recorded configuration and discovery metadata do not guarantee identical output on another run.",
                      "generated_at": datetime.now(timezone.utc).isoformat(),
                      "duration_ms": int((time.monotonic() - started) * 1000),
-                     "context": {"input_bytes": input_bytes, "input_limit_bytes": input_limit(settings),
-                                 "context_tokens": settings.ai_context, "output_tokens": OUTPUT_TOKENS,
+                     "context": {"input_bytes": input_bytes, "input_limit_bytes": input_limit(settings, output_tokens),
+                                 "context_tokens": settings.ai_context, "output_tokens": output_tokens,
                                  "history_omitted": 0}}

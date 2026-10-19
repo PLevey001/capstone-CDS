@@ -229,7 +229,7 @@ def test_optional_inferences_and_matching_inline_reference_can_be_saved(saved_ca
     document = generate(client, case)
     assert document["inferences"] == []
     assert document["overall_summary"][0]["text"] == "Review the recorded case scope (F1)."
-    assert document["prompt_version"] == "case-assessment.v2"
+    assert document["prompt_version"] == "case-assessment.v3"
 
 
 @pytest.mark.parametrize("bad", ["not JSON", "[]", '{"overall_summary":[],"overall_summary":[]}',
