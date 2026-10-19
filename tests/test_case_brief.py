@@ -89,7 +89,8 @@ def test_fact_sheet_is_computed_from_saved_results_without_a_model(workspace):
     assert text["case"] == ['Case "Brief case" has 2 evidence sources; 1 of them has saved analysis results.']
     identity, pending = text["source"]
     assert identity.startswith('Source "usb.img" is a raw disk image of 9 bytes, imported into CDS ')
-    assert identity.endswith(f"Its SHA-256 begins {SHA[:12]}. Latest saved result: run 1, completed.")
+    assert identity.endswith(f"Its analysis SHA-256 begins {SHA[:12]}; no acquisition-reference comparison is reported here. "
+                             "Latest saved result: run 1, completed.")
     assert pending.startswith('Source "notes.txt" is a logical file of 9 bytes')
     assert pending.endswith("It has no saved analysis result yet (job queued).")
     assert text["inventory"] == ['The inventory of "usb.img" lists 8 file entries and 1 directory; '
@@ -102,7 +103,8 @@ def test_fact_sheet_is_computed_from_saved_results_without_a_model(workspace):
     # Itemized lists are capped and say what they left out.
     assert len(text["deleted"]) == 6
     assert text["deleted"][0] == ('Deleted file entry "/gone-0.txt (deleted)" (60 bytes) is listed in "usb.img". '
-                                  "A deleted entry does not show who deleted the file or when.")
+                                  "A deleted entry does not show who deleted the file or when. "
+                                  "Recovery outcome is not reported by this inventory fact.")
     assert text["deleted"][-1] == '"usb.img" lists 2 more deleted file entries that are not itemized in this fact sheet.'
     assert text["time_range"] == ['File timestamps recorded in "usb.img" range from 2023-11-14 22:13 UTC to '
                                   "2023-11-15 00:13 UTC. Filesystem timestamps do not prove user actions."]

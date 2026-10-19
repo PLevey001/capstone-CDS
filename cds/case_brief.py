@@ -103,7 +103,8 @@ def source_facts(source):
         identity += f". It has no saved analysis result yet (job {clean(source['job_status'], 20)})."
         return [{"kind": "source", "text": identity, **link}]
     if source["sha256"]:
-        identity += f". Its SHA-256 begins {source['sha256'][:12]}"
+        identity += (f". Its analysis SHA-256 begins {source['sha256'][:12]}; "
+                     "no acquisition-reference comparison is reported here")
     identity += f". Latest saved result: run {source['run_number']}, {clean(source['run_status'], 20)}."
     facts = [{"kind": "source", "text": identity, **link}]
     if source["job_status"] != source["run_status"]:
@@ -183,7 +184,8 @@ def source_facts(source):
         size = f" ({size_text(item['size'])})" if item["size"] is not None else ""
         facts.append({"kind": "deleted", "artifact_id": item["id"], "artifact_path": item["path"], **link,
                       "text": f'Deleted file entry "{clean(item["path"])}"{size} is listed in {name}. '
-                              "A deleted entry does not show who deleted the file or when."})
+                              "A deleted entry does not show who deleted the file or when. "
+                              "Recovery outcome is not reported by this inventory fact.", **link})
     remaining = source["deleted_total"] - len(source["deleted"])
     if remaining > 0:
         facts.append({"kind": "deleted", **link,
