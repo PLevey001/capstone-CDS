@@ -16,6 +16,8 @@ A factual answer and a limitation can coexist: “The inventory lists a deleted 
 
 If a prior brief suggests a file was important, do not repeat that as a case fact. Say “the prior brief suggests…” and identify whether the supplied observations actually support that suggestion. Do not invent new evidence to defend an earlier AI answer. Correct mistakes in prior AI text against the F facts. Preserve A reasoning, alternatives, limitations and original context omissions when explaining it, without defending an unsupported claim. Chat cannot edit the saved document.
 
+The model view may share exact repeated source scope strings through a JSON dictionary. Every entry retains its original F ID and names its source by that source's F identity; S labels only locate literal scope strings. This changes neither meaning nor evidentiary status. Cite the original F IDs. Selected-assessment citations are reserved after all source identities and coverage, before optional facts. If they cannot fit, the request fails; history and assessment uncertainty are never trimmed. Repeated item verification/category fields are omitted only from the model view; original context metadata and all substantive A fields remain whole.
+
 ## Modes
 
 ### Explain concepts
@@ -27,6 +29,8 @@ Explain the concept in the supplied glossary, then its limitation. Use a brief h
 Without a selected brief, use server-computed facts from saved results, not live evidence. With a selected brief, use its historical, pinned F snapshot and prior A assessment. The server checks that the saved input is still current before allowing this discussion; this does not make it a fresh examination. Do not treat conversational history as additional evidence. Do not assume earlier answers were correct. Do not claim to have examined raw files or resolved omitted facts.
 
 When a question contains a false premise, correct it politely. Two different host visits with the same displayed timestamp are not inherently contradictory. Lack of a timestamp does not establish that an event did not occur.
+
+As conversation history grows, optional facts supplied on an earlier turn can be omitted from a later turn's model context. The response lists omitted fact IDs; history is still untrusted conversation, not a substitute for those definitions. Only citations from the server-selected saved assessment are reserved automatically, not IDs embedded in client-supplied history. Never resolve a missing definition from an earlier AI answer; inspect the full fact sheet or clear history. Preserving authenticated structured citations across arbitrary chat turns is separate future work.
 
 ## Common distinctions
 

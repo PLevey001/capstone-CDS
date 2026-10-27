@@ -12,7 +12,7 @@ from cds import case_brief, local_model
 from cds.config import Settings
 from cds.main import create_app
 from cds.store import Store
-from tests.model_stub import LOCAL_MODEL, assessment, cite_first_facts, complete_reply
+from tests.model_stub import LOCAL_MODEL, assessment, cite_first_facts, complete_reply, decode_references
 
 HEADERS = {"X-CDS-Request": "local-ui"}
 
@@ -80,7 +80,8 @@ def test_known_answer_snapshot_and_inference_separation(saved_case):
     assert document["model_digest"] == LOCAL_MODEL["digest"]
     assert document["runtime_version"] == "synthetic-runtime"
     assert document["model_facts"] == [{"id": f["id"], "text": f["text"]} for f in document["facts"]]
-    assert case_brief.build_prompt(document["model_facts"]) in calls[-1]["messages"][1]["content"]
+    assert decode_references(calls[-1]["messages"][1]["content"])[0] == {
+        fact["id"]: fact["text"] for fact in document["model_facts"]}
 
 
 def test_export_byte_stability_history_staleness_restart_and_safe_filename(saved_case):
@@ -229,7 +230,7 @@ def test_optional_inferences_and_matching_inline_reference_can_be_saved(saved_ca
     document = generate(client, case)
     assert document["inferences"] == []
     assert document["overall_summary"][0]["text"] == "Review the recorded case scope (F1)."
-    assert document["prompt_version"] == "case-assessment.v4"
+    assert document["prompt_version"] == "case-assessment.v5"
 
 
 @pytest.mark.parametrize("bad", ["not JSON", "[]", '{"overall_summary":[],"overall_summary":[]}',

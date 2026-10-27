@@ -56,7 +56,7 @@ def test_outgoing_system_is_composed_from_actual_files_and_exactly_hashed(model,
     system = payload["messages"][0]
     assert system == {"role": "system", "content": expected_system(operation)}
     assert result["prompt_sha256"] == hashlib.sha256(system["content"].encode("utf-8")).hexdigest()
-    assert result["prompt_version"] == ("case-assessment.v4" if operation == "brief" else "learning.v3")
+    assert result["prompt_version"] == ("case-assessment.v5" if operation == "brief" else "learning.v4")
     assert result["guidance_version"] == "0.2"
     assert result["context"]["input_bytes"] == len(local_model.encoded({
         "messages": payload["messages"], "format": payload["format"]}))
@@ -172,7 +172,7 @@ def test_saved_and_downloaded_metadata_cover_actual_system(model):
     saved = app.state.store.saved_brief(case, document["id"])
     for result in (document, saved["document"], json.loads(download(case, document["id"]).body)):
         assert result["prompt_sha256"] == digest
-        assert result["prompt_version"] == "case-assessment.v4"
+        assert result["prompt_version"] == "case-assessment.v5"
         assert result["guidance_version"] == "0.2"
     assert download(case, document["id"]).body == saved["serialized"].encode()
 

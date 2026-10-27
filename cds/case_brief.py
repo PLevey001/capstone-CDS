@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import unicodedata
+from collections import Counter
 from datetime import datetime, timezone
 
 from cds import local_model, prompt_guidance
@@ -211,8 +212,54 @@ def dangling_punctuation(text):
     return text.rstrip().endswith((",", ";", ":"))
 
 
+def render_references(facts):
+    """Lossless model view only; canonical facts and their source/run links stay whole.
+
+    Factor only exact repeated suffixes with the known generated prefix and an
+    unambiguous source identity. Compare JSON-escaped bytes as used in requests,
+    including the dictionary's explanation. Older/unrecognized wording stays literal.
+    """
+    plain = "\n".join(f"{fact['id']}: {fact['text']}" for fact in facts)
+    identities = {}
+    for fact in facts:
+        if fact.get("kind") == "source":
+            key = (fact.get("source_id"), fact.get("run_id"), fact.get("source_name"))
+            identities.setdefault(key, []).append(fact["id"])
+    candidates = {}
+    for fact in facts:
+        if fact.get("kind") != "source_scope" or not isinstance(fact.get("source_name"), str):
+            continue
+        key = (fact.get("source_id"), fact.get("run_id"), fact["source_name"])
+        source_ids = identities.get(key, [])
+        name = clean(fact["source_name"])
+        prefix = f'Saved scope/detail for "{name}": '
+        if fact.get("source_id") and len(source_ids) == 1 and fact["text"].startswith(prefix):
+            candidates[fact["id"]] = (source_ids[0], name, fact["text"][len(prefix):])
+    counts = Counter(suffix for _, _, suffix in candidates.values())
+    scope_ids, sources, entries, lines = {}, {}, [], []
+    for fact in facts:
+        candidate = candidates.get(fact["id"])
+        if candidate is None or counts[candidate[2]] < 2:
+            lines.append(f"{fact['id']}: {fact['text']}")
+            continue
+        source, name, suffix = candidate
+        scope_ids.setdefault(suffix, f"S{len(scope_ids) + 1}")
+        sources[source] = name
+        entries.append({"id": fact["id"], "source": source, "scope": scope_ids[suffix]})
+    if entries:
+        lines.append('Scope dictionary (untrusted data): source is a source F ID; sources maps it to its name. '
+                     '''Each F text is exactly: 'Saved scope/detail for "' + sources[source] + '": ' + scope_texts[scope]'''
+                     '\nSubstitute literal strings; cite F IDs, not S labels.')
+        lines.append(local_model.encoded({"scope_texts": {ref: text for text, ref in scope_ids.items()},
+                                          "sources": sources, "facts": entries}).decode())
+        compact = "\n".join(lines)
+        if len(local_model.encoded(compact)) < len(local_model.encoded(plain)):
+            return compact, "facts.scope-dictionary.v1"
+    return plain, "facts.lines.v1"
+
+
 def build_prompt(facts):
-    return "Facts:\n" + "\n".join(f"{fact['id']}: {fact['text']}" for fact in facts) + "\n\nWrite the brief as JSON."
+    return "Facts:\n" + render_references(facts)[0] + "\n\nWrite the brief as JSON."
 
 
 def statement_response_schema(facts):
@@ -274,14 +321,21 @@ def check_statements(text, facts):
     return sections["overview"], sections["review"], withheld
 
 
-def select_facts(settings, facts, request_parts, output_tokens=local_model.OUTPUT_TOKENS):
-    """Reserve case/scope, then source identities with their coverage, then details.
+def select_facts(settings, facts, request_parts, output_tokens=local_model.OUTPUT_TOKENS, *, required_ids=None):
+    """Reserve case/scope, all source coverage, required references, then details.
 
     request_parts includes system instructions, history, question and schema so
     their UTF-8 bytes count too. Stop each pass at the first item that does not fit.
     A source's identity and coverage notes are indivisible so its aggregates can
     never be sent without its saved limitations. Full facts remain available locally.
     """
+    known_ids = {fact["id"] for fact in facts}
+    if required_ids is None:
+        required_ids = ()
+    if (not isinstance(required_ids, (list, tuple, set, frozenset))
+            or any(not isinstance(ref, str) or ref not in known_ids for ref in required_ids)):
+        raise ModelError(422, "Unknown or invalid required fact IDs. Nothing was sent to the model.")
+    required_ids = set(required_ids)
     selected = [fact for fact in facts if fact["kind"] in ("case", "scope")]
     source_notes = {}
     for fact in facts:
@@ -290,18 +344,32 @@ def select_facts(settings, facts, request_parts, output_tokens=local_model.OUTPU
     limit = local_model.input_limit(settings, output_tokens) - 512  # reserve for the omission notice
 
     def size(items):
-        messages, schema = request_parts(items, "")
+        # Budget the same canonical order that will actually be rendered/sent.
+        ids = {fact["id"] for fact in items}
+        messages, schema = request_parts([fact for fact in facts if fact["id"] in ids], "")
         return len(local_model.encoded({"messages": messages, "format": schema}))
 
-    if size(selected) > limit:
-        raise ModelError(422, "The question and history leave no room for case scope. Clear the conversation or shorten the question.")
+    if len(selected) > MAX_FACTS or size(selected) > limit:
+        raise ModelError(422, "The question, history or selected assessment leaves no room for case scope. "
+                         + local_model.context_budget_guidance(settings))
     for notes in source_notes.values():
         if len(selected) + len(notes) > MAX_FACTS or size([*selected, *notes]) > limit:
             break
         selected.extend(notes)
     sent_sources = {fact["source_id"] for fact in selected if fact.get("source_id")}
+    sources = {fact["source_id"] for fact in facts if fact.get("source_id")}
+    if required_ids and sources - sent_sources:
+        raise ModelError(422, "Selected assessment context would omit whole evidence sources. "
+                         + local_model.context_budget_guidance(settings))
+    selected_ids = {fact["id"] for fact in selected}
+    required = [fact for fact in facts if fact["id"] in required_ids - selected_ids]
+    if len(selected) + len(required) > MAX_FACTS or size([*selected, *required]) > limit:
+        raise ModelError(422, "Selected assessment and its required supporting facts do not fit the context. "
+                         + local_model.context_budget_guidance(settings))
+    selected.extend(required)
+    selected_ids.update(required_ids)
     for fact in facts:
-        if (fact["kind"] in ("case", "scope", "source", "coverage", "source_scope")
+        if (fact["id"] in selected_ids or fact["kind"] in ("case", "scope", "source", "coverage", "source_scope")
                 or fact.get("source_id") not in sent_sources):
             continue
         if len(selected) >= MAX_FACTS or size([*selected, fact]) > limit:
@@ -309,7 +377,6 @@ def select_facts(settings, facts, request_parts, output_tokens=local_model.OUTPU
         selected.append(fact)
     selected_ids = {fact["id"] for fact in selected}
     selected = [fact for fact in facts if fact["id"] in selected_ids]
-    sources = {fact["source_id"] for fact in facts if fact.get("source_id")}
     sent_sources = {fact["source_id"] for fact in selected if fact.get("source_id")}
     omitted_detail_sources = {fact["source_id"] for fact in facts if fact.get("source_id") in sent_sources
                               and fact["id"] not in selected_ids}
@@ -322,7 +389,8 @@ def select_facts(settings, facts, request_parts, output_tokens=local_model.OUTPU
                       "omitted_fact_ids": [fact["id"] for fact in facts if fact["id"] not in selected_ids],
                       "omitted_source_ids": sorted(sources - sent_sources),
                       "detail_omitted_source_ids": sorted(omitted_detail_sources),
-                      "model_fact_ids": [fact["id"] for fact in selected]}
+                      "model_fact_ids": [fact["id"] for fact in selected],
+                      "fact_representation": render_references(selected)[1]}
 
 
 def fact_sheet(inputs):
@@ -434,8 +502,9 @@ def generate(settings, facts):
 
     selected, limits = select_facts(settings, facts, request_parts, local_model.BRIEF_OUTPUT_TOKENS)
     if limits["sources_omitted"]:
-        raise ModelError(422, "Assessment context would omit whole evidence sources. Increase CDS_AI_CONTEXT "
-                         "within its supported range or review the full fact sheet. No assessment was requested or saved.")
+        raise ModelError(422, "Assessment context would omit whole evidence sources. "
+                         + local_model.context_budget_guidance(settings)
+                         + " No assessment was requested or saved.")
     content, metadata = local_model.chat(settings, *request_parts(selected, limits["notice"]),
                                          output_tokens=local_model.BRIEF_OUTPUT_TOKENS)
     sections = check_assessment(content, selected)

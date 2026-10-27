@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 GUIDANCE_VERSION = "0.2"
-BRIEF_VERSION = "case-assessment.v4"
-CHAT_VERSION = "learning.v3"
+BRIEF_VERSION = "case-assessment.v5"
+CHAT_VERSION = "learning.v4"
 _DIRECTORY = Path(__file__).parent / "prompts"
 _COMPOSITIONS = {
     "brief": ("common.txt", "case-brief.txt"),

@@ -18,6 +18,27 @@ def assessment(statement="The saved results describe evidence sources.", fact="F
             "observations": [], "inferences": [], "review_next": []}
 
 
+def decode_references(text):
+    """Independent reconstruction of both documented model fact representations."""
+    result, source_refs = {}, {}
+    for line in text.splitlines():
+        if line.startswith('{"facts":'):
+            data = json.loads(line)
+            assert set(data) == {"facts", "sources", "scope_texts"}
+            for item in data["facts"]:
+                assert set(item) == {"id", "source", "scope"}
+                assert item["id"] not in result
+                name = data["sources"][item["source"]]
+                result[item["id"]] = f'Saved scope/detail for "{name}": ' + data["scope_texts"][item["scope"]]
+                source_refs[item["id"]] = item["source"]
+        elif re.match(r"^F\d+: ", line):
+            ref, value = line.split(": ", 1)
+            assert ref not in result
+            result[ref] = value
+    assert set(source_refs.values()) <= result.keys()
+    return result, source_refs
+
+
 def cite_first_facts(payload):
     """Scripted categorized assessment or educational answer; never evaluates a real model."""
     if "answer" in payload["format"].get("properties", {}):
@@ -27,7 +48,7 @@ def cite_first_facts(payload):
                 "facts": ["A-overall_summary-1", "F1"]}], "cannot_answer": False})
         return 200, complete_reply({"answer": [{"statement": "Scripted general explanation." if concepts else "Scripted case observation.",
                                              "facts": ["G1" if concepts else "F1"]}], "cannot_answer": False})
-    facts = dict(re.findall(r"^(F\d+): (.*)$", payload["messages"][-1]["content"], re.MULTILINE))
+    facts, _ = decode_references(payload["messages"][-1]["content"])
     result = assessment()
     inventory = next((ref for ref, text in facts.items() if text.startswith("The inventory of")), None)
     if inventory:

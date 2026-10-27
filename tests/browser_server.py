@@ -1,6 +1,5 @@
 """Disposable backend for Playwright. Never run against a user's workspace."""
 from pathlib import Path
-import re
 import tempfile
 from uuid import uuid4
 
@@ -11,12 +10,12 @@ from cds.analysis import analyze
 from cds.config import Settings
 from cds.main import create_app
 from scripts.make_browser_demo import make_chrome_history, make_firefox_history
-from tests.model_stub import LOCAL_MODEL, ModelStub, assessment, cite_first_facts, complete_reply
+from tests.model_stub import LOCAL_MODEL, ModelStub, assessment, cite_first_facts, complete_reply, decode_references
 
 
 def flagged_brief(payload):
     """Scripted wording with one wrong number and one statement that cites nothing."""
-    facts = dict(re.findall(r"^(F\d+): (.*)$", payload["messages"][-1]["content"], re.MULTILINE))
+    facts, _ = decode_references(payload["messages"][-1]["content"])
     inventory = next(fact for fact, text in facts.items() if text.startswith("The inventory of"))
     coverage = next(fact for fact, text in facts.items() if text.startswith("Coverage for"))
     content = assessment("The case holds one analyzed disk image.")

@@ -149,12 +149,23 @@ def input_limit(settings, output_tokens=OUTPUT_TOKENS):
     return settings.ai_context - output_tokens - TEMPLATE_RESERVE
 
 
+def context_budget_guidance(settings):
+    text = ("CDS uses a conservative request byte budget, not the model's token capacity. "
+            "Clear history or shorten the question. For case questions, deselect the brief "
+            "or review the full Case brief fact sheet.")
+    if settings.ai_context < 32768:
+        text += (" CDS_AI_CONTEXT can be increased up to 32768 if the installed model supports it; "
+                 "this does not guarantee the request will fit.")
+    return text
+
+
 def chat(settings, messages, schema, output_tokens=OUTPUT_TOKENS):
     started = time.monotonic()
     deadline = started + settings.ai_timeout
     input_bytes = len(encoded({"messages": messages, "format": schema}))
     if input_bytes > input_limit(settings, output_tokens):
-        raise ModelError(422, "Conversation exceeds the configured AI context budget. Clear it or shorten the question.")
+        raise ModelError(422, "Conversation exceeds the configured AI context budget. "
+                         + context_budget_guidance(settings))
     discovery = discover(settings, deadline)
     runtime_version = None
     try:

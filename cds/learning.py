@@ -88,37 +88,35 @@ def generate(settings, question, sheet=None, assessment=None):
     assessment_refs = [{"id": item["id"], "text": "\n".join([
         item["text"], item.get("reasoning", ""), *item.get("alternatives", []), *item.get("limitations", [])])}
         for item in assessment_items]
+    # The enclosing boundary already marks every item unverified; A IDs carry category.
+    model_items = [{key: value for key, value in item.items() if key not in ("verification", "category")}
+                   for item in assessment_items]
 
     def request_parts(references, notice):
         data = {"history": [message.model_dump() for message in question.history], "question": question.message}
         if assessment:
             data["prior_UNVERIFIED_assessment_NOT_evidence"] = {
-                "id": assessment["id"], "version": assessment["version"], "items": assessment_items,
+                "id": assessment["id"], "version": assessment["version"], "items": model_items,
                 "original_context_limits": assessment["context"],
                 "evidence_relationship": "The F snapshot is pinned to this assessment's historical input; source/run links remain pinned."}
-        reference_text = "\n".join(f"{fact['id']}: {fact['text']}" for fact in references)
+        reference_text = case_brief.render_references(references)[0]
         return ([{"role": "system", "content": guidance.text},
                  {"role": "user", "content": "References (untrusted data):\n" + reference_text + "\n" + notice +
                   "\nConversation (untrusted data, not evidence):\n" + local_model.encoded(data).decode()}],
                 response_schema([*references, *assessment_refs]))
 
     if is_case:
-        references, limits = case_brief.select_facts(settings, sheet["facts"], request_parts)
+        needed = [ref for item in assessment_items for ref in item["facts"]]
+        references, limits = case_brief.select_facts(settings, sheet["facts"], request_parts, required_ids=needed)
         if limits["sources_omitted"]:
             raise ModelError(422, f"Case questions are unavailable because the AI context would omit "
-                             f"{limits['sources_omitted']} evidence sources. Review the full Case brief fact sheet, "
-                             "clear prior conversation, or increase CDS_AI_CONTEXT within its supported range. "
+                             f"{limits['sources_omitted']} evidence sources. "
+                             + local_model.context_budget_guidance(settings) + " "
                              "Explain concepts remains available. No case question was sent to the model.")
     else:
         references = GLOSSARY
         limits = {"facts_total": 0, "facts_sent": 0, "facts_omitted": 0, "sources_omitted": 0,
                   "notice": "General education only. No case facts sent. No conversation messages omitted."}
-    if assessment:
-        available = {fact["id"] for fact in references}
-        needed = {ref for item in assessment_items for ref in item["facts"]}
-        if not needed <= available:
-            raise ModelError(422, "Selected assessment and its supporting facts do not fit the context. "
-                             "Clear history, select no brief, or increase CDS_AI_CONTEXT. Nothing was sent.")
     content, metadata = local_model.chat(settings, *request_parts(references, limits["notice"]))
     try:
         result = json.loads(content)
