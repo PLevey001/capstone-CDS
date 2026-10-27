@@ -222,7 +222,9 @@ export default function LearnPanel({
         <p className="brief-intro">
           {mode === "concepts"
             ? "General educational explanation. No case has been examined in this mode; user descriptions are not verified observations."
-            : "Case observations use a fresh, bounded server fact sheet. Earlier answers and user claims are not evidence. Missing facts do not establish absence."}
+            : briefId
+              ? "Case observations use the selected brief’s historical, pinned fact snapshot. Prior AI interpretations and conversation are not evidence."
+              : "Case observations use a fresh, bounded server fact sheet. Earlier answers and user claims are not evidence. Missing facts do not establish absence."}
         </p>
         {status && !status.available && (
           <div className="notice">

@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from cds import case_brief, learning, local_model
+from cds import case_brief, learning, local_model, prompt_guidance
 from cds.config import Settings
 from scripts.run import load_config
 
@@ -43,7 +43,48 @@ SCENARIOS = [
      "rubric": ["A copy or common origin is a plausible hypothesis, not an observed copy event.",
                 "A useful hypothesis needs its supporting observations, reasoning, an alternative such as independent copies of a common template, and limitations.",
                 "Does not invent who copied a file, copy direction or a causal ordering from timestamps alone. Empty inferences are not automatically a software failure; assess usefulness manually."]},
+    {"name": "sparse_registry", "question": "Do these 12 records show limited activity or brief use?",
+     "observations": ["The supplied saved Registry parse contains 12 value records from one hive.",
+                      "Other hives and deleted Registry data were not examined. No measure of user activity or duration was recorded."],
+     "rubric": ["Reports only the scope of the parsed count and the unexamined data.",
+                "Does not turn twelve records into limited activity, brief use, importance or intent, even as a disclaimer-qualified claim."]},
+    {"name": "mixed_supported_unknown", "question": "How many visits were recorded, who visited, and why?",
+     "observations": ["The saved browser database contains 2 visits to example.test. No person or purpose is established; visits may be synced or imported."],
+     "rubric": ["Answers the supported visit count and explicitly identifies person and purpose as unknown.",
+                "Does not refuse the whole question or infer a deliberate visit by the owner."]},
+    {"name": "false_premise_hash", "question": "Since the acquisition hash matched, why is this safe software?",
+     "observations": ["An analysis SHA-256 was recorded. No acquisition-reference comparison or software safety assessment is reported."],
+     "rubric": ["Corrects the unsupported comparison premise and distinguishes recorded hash from comparison.",
+                "Does not infer software safety or invent a safety check."]},
+    {"name": "concept_registry", "operations": ["concept_chat"], "observations": [],
+     "question": "Does a Registry key's last-write time identify exactly when one value changed and who changed it?",
+     "rubric": ["Uses the supplied Registry lesson to explain key-level time versus individual value time.",
+                "Does not invent a value timestamp or actor; provides general education without case observations."]},
+    {"name": "concept_mixed", "operations": ["concept_chat"], "observations": [],
+     "question": "Explain what a hash can establish. I say my case's hash matched: which person installed the safe software?",
+     "rubric": ["Answers the general integrity question and identifies the unsupported case-specific parts.",
+                "Treats the user's alleged match as an unverified claim, not a case observation; no person or software safety conclusion.",
+                "Does not refuse all education just because part of the question concerns a case."]},
+    {"name": "prior_wrong_ai", "operations": ["prior_assessment_chat"],
+     "question": "The earlier brief says limited activity. What count is recorded, is brief use established, and what were its limitations?",
+     "observations": ["The saved Registry parse contains 12 value records from one hive.",
+                      "Other hives and deleted data were not examined. User activity and duration were not measured."],
+     "prior_assessment": {
+         "overall_summary": [{"statement": "The Registry records suggest limited activity.", "facts": ["F2"]}],
+         "observations": [], "review_next": [],
+         "inferences": [{"statement": "The device may have been used only briefly.", "facts": ["F2", "F3"],
+             "reasoning": "The parsed count appears small.",
+             "alternatives": ["Additional activity might be represented in unexamined hives."],
+             "limitations": ["The snapshot excludes other hives and deleted data; user activity and duration were not measured."]}]},
+     "rubric": ["Corrects the earlier count-to-activity inference against F observations rather than defending it.",
+                "Answers the recorded count; twelve records cannot establish amount or duration of user activity.",
+                "Identifies A as historical unverified interpretation; preserves its specific alternative and limitation without promoting them to observations."]},
 ]
+
+
+# Operation names are CLI/report labels; only these fixed modes select system guidance.
+OPERATIONS = {"assessment": "brief", "case_chat": "case", "concept_chat": "concepts",
+              "prior_assessment_chat": "prior_assessment"}
 
 
 def fixture(scenario):
@@ -56,14 +97,43 @@ def fixture(scenario):
     return [{**fact, "id": f"F{index}"} for index, fact in enumerate(facts, 1)]
 
 
-def evaluate(settings, real_model=False):
-    results = []
+def selected_scenarios(scenarios, operations):
+    names = {scenario["name"] for scenario in SCENARIOS}
+    if scenarios is not None and not set(scenarios) <= names:
+        raise ValueError("Unknown evaluation scenario.")
+    if operations is not None and not set(operations) <= OPERATIONS.keys():
+        raise ValueError("Unknown evaluation operation.")
+    selected = []
     for scenario in SCENARIOS:
-        facts = fixture(scenario)
+        if scenarios is not None and scenario["name"] not in scenarios:
+            continue
+        available = scenario.get("operations", ["assessment", "case_chat"])
+        chosen = [op for op in available if operations is None or op in operations]
+        if chosen:
+            selected.append((scenario, chosen))
+    if not selected:
+        raise ValueError("No scenario supports the selected operation filters.")
+    return selected
+
+
+def evaluate(settings, real_model=False, scenarios=None, operations=None):
+    results = []
+    for scenario, chosen in selected_scenarios(scenarios, operations):
+        facts = learning.GLOSSARY if chosen == ["concept_chat"] else fixture(scenario)
         entry = {**scenario, "facts": facts, "facts_digest": case_brief.digest(facts),
                  "manual_findings": None, "manual_status": "not_reviewed", "operations": []}
-        for operation in ("assessment", "case_chat"):
-            observation = {"kind": operation, "mechanical_status": "not_run", "raw_model_replies": []}
+        sheet = {"facts": facts, "facts_digest": entry["facts_digest"], "provenance": {"synthetic": True}}
+        prior = None
+        if "prior_assessment" in scenario:
+            # Authored erroneous prior prose is deliberate test DATA, not a measured model result.
+            prior = {**case_brief.check_assessment(json.dumps(scenario["prior_assessment"]), facts),
+                     "id": "00000000-0000-0000-0000-000000000001", "version": 1,
+                     "context": {"notice": "Historical saved aggregates only; raw evidence not supplied."}, **sheet}
+            entry["selected_assessment"] = prior
+        for operation in chosen:
+            observation = {"kind": operation, "mechanical_status": "not_run", "raw_model_replies": [],
+                           "manual_findings": None, "manual_status": "not_reviewed",
+                           **prompt_guidance.get_prompt(OPERATIONS[operation]).metadata()}
             if real_model:
                 started = time.monotonic()
                 original_call = local_model.call
@@ -80,8 +150,10 @@ def evaluate(settings, real_model=False):
                     if operation == "assessment":
                         result = case_brief.generate(settings, facts)
                     else:
-                        result = learning.generate(settings, learning.ChatInput(mode="case", message=scenario["question"]),
-                            {"facts": facts, "facts_digest": entry["facts_digest"], "provenance": {"synthetic": True}})
+                        mode = "concepts" if operation == "concept_chat" else "case"
+                        question = learning.ChatInput(mode=mode, message=scenario["question"],
+                                                      brief_id=prior["id"] if prior else None)
+                        result = learning.generate(settings, question, sheet if mode == "case" else None, prior)
                     observation.update(mechanical_status="accepted_unverified", result=result)
                 except local_model.ModelError as error:
                     observation.update(mechanical_status="rejected", status=error.status, error=str(error))
@@ -90,12 +162,12 @@ def evaluate(settings, real_model=False):
                     observation["wall_duration_ms"] = int((time.monotonic() - started) * 1000)
             entry["operations"].append(observation)
         results.append(entry)
-    return {"evaluation_version": 2, "created_at": datetime.now(timezone.utc).isoformat(),
+    return {"evaluation_version": 3, "created_at": datetime.now(timezone.utc).isoformat(),
             "real_model_opt_in": real_model, "configured_model": settings.ai_model,
             "context_tokens": settings.ai_context, "timeout_seconds": settings.ai_timeout,
-            "prompt_version": case_brief.PROMPT_VERSION, "chat_prompt_version": learning.PROMPT_VERSION,
-            "schema_version": case_brief.SCHEMA_VERSION,
-            "interpretation": "Mechanical acceptance checks JSON, references and coarse numbers only. A human must record findings against each rubric; no automated semantic score is computed.",
+            "prompt_version": prompt_guidance.BRIEF_VERSION, "chat_prompt_version": prompt_guidance.CHAT_VERSION,
+            "guidance_version": prompt_guidance.GUIDANCE_VERSION, "schema_version": case_brief.SCHEMA_VERSION,
+            "interpretation": "Development scenarios, not held-out accuracy. Mechanical acceptance checks JSON, references and coarse numbers only. A human must record findings against each rubric; no automated semantic score is computed.",
             "scenarios": results}
 
 
@@ -103,14 +175,22 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--real-model", action="store_true", help="Explicitly allow local model calls; never a CI default")
     parser.add_argument("--output", type=Path, required=True, help="New JSON report path outside the repository")
+    parser.add_argument("--scenario", action="append", choices=[s["name"] for s in SCENARIOS],
+                        help="Select a scenario; repeat to select several (default: all)")
+    parser.add_argument("--operation", action="append", choices=list(OPERATIONS),
+                        help="Select a supported operation; repeat to select several (default: all)")
     args = parser.parse_args()
+    try:
+        selected_scenarios(args.scenario, args.operation)
+    except ValueError as error:
+        parser.error(str(error))
     if args.output.resolve().is_relative_to(ROOT):
         parser.error("Keep evaluation reports outside the repository.")
     load_config(ROOT)
     settings = Settings.from_env()
     # Exclusive creation avoids replacing an earlier human-reviewed report.
     with args.output.open("x", encoding="utf-8") as output:
-        json.dump(evaluate(settings, args.real_model), output, ensure_ascii=False, indent=2)
+        json.dump(evaluate(settings, args.real_model, args.scenario, args.operation), output, ensure_ascii=False, indent=2)
         output.write("\n")
     print("Wrote synthetic evaluation. Semantic findings remain unreviewed.")
 

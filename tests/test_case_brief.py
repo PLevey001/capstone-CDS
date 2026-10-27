@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import cds.case_brief as case_brief
-from cds import local_model
+from cds import local_model, prompt_guidance
 from cds.config import Settings
 from cds.main import create_app
 from tests.model_stub import LOCAL_MODEL, ModelStub, assessment, complete_reply
@@ -195,7 +195,7 @@ def test_brief_saves_only_complete_assessments_with_real_references(workspace):
     assert request["path"] == "/api/chat" and payload["model"] == "llama3.2:3b" and payload["stream"] is False
     assert payload["options"]["temperature"] == 0
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
-    assert payload["messages"][0]["content"] == case_brief.SYSTEM_PROMPT
+    assert payload["messages"][0]["content"] == prompt_guidance.get_prompt("brief").text
     assert payload["messages"][1]["content"].startswith(case_brief.build_prompt(brief["model_facts"]))
     assert payload["format"]["$defs"]["item"]["properties"]["facts"]["items"]["enum"] == [
         fact["id"] for fact in brief["model_facts"]]

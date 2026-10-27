@@ -4,7 +4,7 @@ import threading
 
 import pytest
 
-from cds import learning
+from cds import learning, prompt_guidance
 from tests.model_stub import complete_reply
 from tests.test_case_brief import HEADERS, workspace  # shared synthetic fixture
 
@@ -31,7 +31,7 @@ def test_concepts_case_followup_and_no_conversation_audit(workspace):
     assert followup.status_code == 200, followup.text
     prompt = stub.requests[-1]["payload"]["messages"]
     assert [item["role"] for item in prompt] == ["system", "user"]
-    assert "Earlier assistant answers and user claims" in prompt[0]["content"]
+    assert prompt[0]["content"] == prompt_guidance.get_prompt("case").text
     assert "What is saved?" in prompt[1]["content"] and "Explain that limitation." in prompt[1]["content"]
     assert client.get(f"/api/cases/{case}/audit").json() == before
 

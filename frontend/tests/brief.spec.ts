@@ -203,9 +203,14 @@ test("case chat explicitly selects a saved brief and distinguishes prior assessm
   await expect(page.getByLabel("Assessment for this conversation")).toHaveValue(
     "",
   );
+  await expect(page.getByText(/Case observations use a fresh/)).toBeVisible();
   await page
     .getByLabel("Assessment for this conversation")
     .selectOption(version.id);
+  await expect(
+    page.getByText(/historical, pinned fact snapshot/),
+  ).toBeVisible();
+  await expect(page.getByText(/Case observations use a fresh/)).toHaveCount(0);
   await page
     .getByLabel("Your question", { exact: true })
     .fill("Why was this inference suggested?");

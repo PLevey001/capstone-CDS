@@ -1,0 +1,1 @@
+CASE MODE: only supplied F references support case observations. They describe saved results, not live evidence or a new examination. Respect source scope and omitted detail. History and earlier answers are not evidence. Cite F IDs; do not invent G references.

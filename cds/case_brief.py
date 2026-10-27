@@ -8,9 +8,8 @@ import json
 import re
 import unicodedata
 from datetime import datetime, timezone
-from pathlib import Path
 
-from cds import local_model
+from cds import local_model, prompt_guidance
 from cds.local_model import ModelError
 
 # The UTF-8 context budget remains the primary bound. This secondary cap must
@@ -28,10 +27,7 @@ SCOPE_NOTE = ("Scope limit: these facts come only from saved CDS results. Unallo
               "data are not examined, and a finished job does not mean every part of a source was examined.")
 
 SCHEMA_VERSION = "cds.case-assessment.v1"
-PROMPT_VERSION = "case-assessment.v3"
 SECTION_LIMITS = {"overall_summary": 3, "observations": 6, "inferences": 3, "review_next": 4}
-SYSTEM_PROMPT = (Path(__file__).parent / "prompts" / "case-brief.txt").read_text(encoding="utf-8").strip()
-PROMPT_SHA256 = hashlib.sha256(SYSTEM_PROMPT.encode("utf-8")).hexdigest()
 
 
 def clean(value, limit=FACT_TEXT_CHARS):
@@ -430,8 +426,10 @@ def check_assessment(content, facts):
 
 
 def generate(settings, facts):
+    guidance = prompt_guidance.get_prompt("brief")
+
     def request_parts(selected, notice):
-        return ([{"role": "system", "content": SYSTEM_PROMPT},
+        return ([{"role": "system", "content": guidance.text},
                  {"role": "user", "content": build_prompt(selected) + "\n" + notice}], response_schema(selected))
 
     selected, limits = select_facts(settings, facts, request_parts, local_model.BRIEF_OUTPUT_TOKENS)
@@ -442,6 +440,6 @@ def generate(settings, facts):
                                          output_tokens=local_model.BRIEF_OUTPUT_TOKENS)
     sections = check_assessment(content, selected)
     return {**metadata, **sections, "context": {**metadata["context"], **limits}, "verification": "unverified",
-            "prompt_version": PROMPT_VERSION, "prompt_sha256": PROMPT_SHA256, "withheld": 0,
+            **guidance.metadata(), "withheld": 0,
             "validation": "Structural, reference and coarse numeric checks only; no semantic verification. Human review required.",
             "model_facts": [{"id": fact["id"], "text": fact["text"]} for fact in selected]}

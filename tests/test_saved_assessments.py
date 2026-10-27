@@ -229,7 +229,7 @@ def test_optional_inferences_and_matching_inline_reference_can_be_saved(saved_ca
     document = generate(client, case)
     assert document["inferences"] == []
     assert document["overall_summary"][0]["text"] == "Review the recorded case scope (F1)."
-    assert document["prompt_version"] == "case-assessment.v3"
+    assert document["prompt_version"] == "case-assessment.v4"
 
 
 @pytest.mark.parametrize("bad", ["not JSON", "[]", '{"overall_summary":[],"overall_summary":[]}',
@@ -282,6 +282,15 @@ def test_selected_brief_chat_separation_staleness_and_budget(saved_case):
     assert "prior_UNVERIFIED_assessment_NOT_evidence" in prompt
     for text in brief["inferences"][0]["alternatives"] + brief["inferences"][0]["limitations"]:
         assert text in prompt
+    followup = client.post(route, headers=HEADERS, json=body | {
+        "message": "What limits that interpretation?", "facts_digest": reply["facts_digest"],
+        "history": [{"role": "user", "content": body["message"]},
+                    {"role": "assistant", "content": reply["answer"][0]["text"]}]})
+    assert followup.status_code == 200, followup.text
+    assert followup.json()["facts_digest"] == brief["facts_digest"]
+    assert followup.json()["selected_brief"] == reply["selected_brief"]
+    assert followup.json()["facts"] == reply["facts"]
+    assert reply["answer"][0]["text"] in calls[-1]["messages"][1]["content"]
     assert client.post(route, headers=HEADERS, json=body | {"mode": "concepts"}).status_code == 422
     count = len(calls)
     store.rename_case(case, "Renamed")
@@ -318,12 +327,12 @@ def test_selected_assessment_fits_default_context(saved_case):
 
 
 def test_evaluator_defaults_to_no_calls_and_no_semantic_grade(tmp_path, monkeypatch):
-    from scripts.evaluate_local_ai import evaluate
+    from scripts.evaluate_local_ai import SCENARIOS, evaluate
     def unexpected(*args, **kwargs):
         pytest.fail("Default evaluator must never call a model")
     monkeypatch.setattr(local_model, "call", unexpected)
     report = evaluate(Settings(tmp_path))
-    assert len(report["scenarios"]) == 6 and report["real_model_opt_in"] is False
+    assert len(report["scenarios"]) == len(SCENARIOS) and report["real_model_opt_in"] is False
     assert all(entry["manual_findings"] is None and entry["manual_status"] == "not_reviewed"
                for entry in report["scenarios"])
     assert all(op["mechanical_status"] == "not_run" for entry in report["scenarios"] for op in entry["operations"])

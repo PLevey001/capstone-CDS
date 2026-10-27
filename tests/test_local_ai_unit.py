@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException, Request
 from pydantic import ValidationError
 
-from cds import case_brief, learning, local_model
+from cds import case_brief, prompt_guidance, learning, local_model
 from cds.config import Settings
 from cds.main import create_app
 from cds.store import Store
@@ -90,7 +90,7 @@ def test_context_selection_retains_scope_and_counts_omissions(model):
     facts.append({"id": "F100", "kind": "scope", "text": case_brief.SCOPE_NOTE, "source_id": None})
 
     def parts(selected, notice):
-        return [{"role": "system", "content": case_brief.SYSTEM_PROMPT},
+        return [{"role": "system", "content": prompt_guidance.get_prompt("brief").text},
                 {"role": "user", "content": case_brief.build_prompt(selected) + notice}], case_brief.response_schema(selected)
 
     selected, limits = case_brief.select_facts(settings, facts, parts)
@@ -124,7 +124,7 @@ def test_reviewed_lessons_preserve_integrity_and_registry_distinctions():
     assert "authenticity, authorship, intent" in lessons["G1"]
     assert "Individual Registry values have no independent change timestamp" in lessons["G6"]
     assert "not a change time for a particular value" in lessons["G6"]
-    assert "Prefer one concise answer item" in learning.SYSTEM
+    assert "Prefer one concise answer item" in prompt_guidance.get_prompt("concepts").text
 
 
 @pytest.mark.parametrize("content", ["not json", "[]", '{"answer": [], "cannot_answer": "yes"}',

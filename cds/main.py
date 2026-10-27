@@ -419,14 +419,15 @@ def create_app(settings=None, start_workers=True):
             raise HTTPException(409, "A local AI answer is already being generated. Wait for it to finish.")
         try:
             sheet = fact_sheet(case_id) if question.mode == "case" else None
-            if sheet and question.facts_digest and question.facts_digest != sheet["facts_digest"]:
-                raise HTTPException(409, "Case facts changed or belong to another case. Clear the conversation and try again.")
             assessment = None
             if question.brief_id:
                 selected = brief_envelope(case_id, question.brief_id)
                 if selected["stale"] or selected["document"]["input_digest"] != sheet["input_digest"]:
                     raise HTTPException(409, "Selected AI brief is stale. Regenerate or select a current version; clear the conversation. Viewing and downloading remain available.")
                 assessment = selected["document"]
+                sheet = assessment  # Pin F references and provenance to the selected historical snapshot.
+            if sheet and question.facts_digest and question.facts_digest != sheet["facts_digest"]:
+                raise HTTPException(409, "Case facts changed or belong to another case. Clear the conversation and try again.")
             result = learning.generate(settings, question, sheet, assessment)
             require_case(case_id)
             if sheet and fact_sheet(case_id)["input_digest"] != sheet["input_digest"]:
