@@ -165,20 +165,70 @@ export type BriefFact = {
 export type BriefStatement = {
   text: string;
   facts: string[];
-  numbers_match: boolean;
+  verification: "unverified";
 };
 export type FactSheet = {
   saved_sources: number;
   facts: BriefFact[];
   facts_digest: string;
+  input_digest: string;
 };
 export type CaseBrief = FactSheet & {
   model: string;
   generated_at: string;
   duration_ms: number;
-  overview: BriefStatement[];
-  review: BriefStatement[];
+  id: string;
+  version: number;
+  schema_version: string;
+  overall_summary: AssessmentItem[];
+  observations: AssessmentItem[];
+  inferences: AssessmentItem[];
+  review_next: AssessmentItem[];
+  model_facts: Pick<BriefFact, "id" | "text">[];
   withheld: number;
+  context: AiContext;
+};
+export type AssessmentItem = BriefStatement & {
+  id: string;
+  category?: string;
+  reasoning?: string;
+  alternatives?: string[];
+  limitations?: string[];
+};
+export type SavedBrief = {
+  document: CaseBrief;
+  stale: boolean;
+  document_sha256: string;
+};
+export type BriefVersion = {
+  id: string;
+  version: number;
+  generated_at: string;
+  stale: boolean;
+};
+export type AiContext = {
+  input_bytes: number;
+  input_limit_bytes: number;
+  context_tokens: number;
+  output_tokens: number;
+  facts_sent: number;
+  facts_total: number;
+  facts_omitted: number;
+  history_omitted: number;
+  notice: string;
+};
+export type ChatAnswer = {
+  mode: "concepts" | "case";
+  answer: BriefStatement[];
+  uncertainty: string | null;
+  withheld: number;
+  model: string;
+  facts: BriefFact[];
+  facts_digest: string | null;
+  context: AiContext;
+  selected_brief: { id: string; version: number } | null;
+  assessment_items: AssessmentItem[];
+  glossary: { id: string; title: string; text: string; url: string }[];
 };
 export type AiStatus = {
   available: boolean;
@@ -193,6 +243,15 @@ export type Health = {
   max_upload_bytes: number;
 };
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api${path}`, {
     ...init,
@@ -200,11 +259,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => null);
-    throw new Error(
-      typeof body?.detail === "string"
-        ? body.detail
-        : `Request failed (${response.status})`,
-    );
+    if (typeof body?.detail === "string")
+      throw new ApiError(body.detail, response.status);
+    throw new Error(`Request failed (${response.status})`);
   }
   return response.json();
 }

@@ -15,6 +15,9 @@ dev = ["pytest>=8,<10", "httpx>=0.28,<1"]
 [tool.setuptools.packages.find]
 include = ["cds*"]
 
+[tool.setuptools.package-data]
+cds = ["prompts/*.txt"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]

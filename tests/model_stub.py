@@ -5,15 +5,60 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOCAL_MODEL = {"name": "llama3.2:3b", "model": "llama3.2:3b", "size": 2019393189,
-               "details": {"format": "gguf", "parameter_size": "3.2B"}}
+               "digest": "sha256:" + "a" * 64, "details": {"format": "gguf", "parameter_size": "3.2B"}}
+
+
+def complete_reply(content, model="llama3.2:3b"):
+    return {"model": model, "done": True, "done_reason": "stop",
+            "message": {"role": "assistant", "content": json.dumps(content) if not isinstance(content, str) else content}}
+
+
+def assessment(statement="The saved results describe evidence sources.", fact="F1"):
+    return {"overall_summary": [{"statement": statement, "facts": [fact]}],
+            "observations": [], "inferences": [], "review_next": []}
+
+
+def decode_references(text):
+    """Independent reconstruction of both documented model fact representations."""
+    result, source_refs = {}, {}
+    for line in text.splitlines():
+        if line.startswith('{"facts":'):
+            data = json.loads(line)
+            assert set(data) == {"facts", "sources", "scope_texts"}
+            for item in data["facts"]:
+                assert set(item) == {"id", "source", "scope"}
+                assert item["id"] not in result
+                name = data["sources"][item["source"]]
+                result[item["id"]] = f'Saved scope/detail for "{name}": ' + data["scope_texts"][item["scope"]]
+                source_refs[item["id"]] = item["source"]
+        elif re.match(r"^F\d+: ", line):
+            ref, value = line.split(": ", 1)
+            assert ref not in result
+            result[ref] = value
+    assert set(source_refs.values()) <= result.keys()
+    return result, source_refs
 
 
 def cite_first_facts(payload):
-    """Default reply: one overview statement per leading fact, then one review item."""
-    ids = re.findall(r"^(F\d+): ", payload["messages"][-1]["content"], re.MULTILINE)
-    overview = [{"statement": f"Scripted overview statement about {fact}.", "facts": [fact]} for fact in ids[:2]]
-    review = [{"statement": "Scripted review item.", "facts": ids[-1:]}]
-    return 200, {"message": {"role": "assistant", "content": json.dumps({"overview": overview, "review": review})}}
+    """Scripted categorized assessment or educational answer; never evaluates a real model."""
+    if "answer" in payload["format"].get("properties", {}):
+        concepts = "CONCEPT MODE" in payload["messages"][0]["content"]
+        if "prior_UNVERIFIED_assessment_NOT_evidence" in payload["messages"][1]["content"]:
+            return 200, complete_reply({"answer": [{"statement": "The prior suggestion is tentative and needs review.",
+                "facts": ["A-overall_summary-1", "F1"]}], "cannot_answer": False})
+        return 200, complete_reply({"answer": [{"statement": "Scripted general explanation." if concepts else "Scripted case observation.",
+                                             "facts": ["G1" if concepts else "F1"]}], "cannot_answer": False})
+    facts, _ = decode_references(payload["messages"][-1]["content"])
+    result = assessment()
+    inventory = next((ref for ref, text in facts.items() if text.startswith("The inventory of")), None)
+    if inventory:
+        result["observations"] = [{"statement": facts[inventory], "facts": [inventory]}]
+        result["inferences"] = [{"statement": "The inventory may help focus a file review.", "facts": [inventory],
+            "reasoning": "The saved inventory identifies file entries for further examination.",
+            "alternatives": ["Relevant material may also exist outside the saved inventory."],
+            "limitations": ["File entries do not establish an actor or intent."]}]
+        result["review_next"] = [{"statement": "Review the saved inventory alongside its coverage limits.", "facts": [inventory]}]
+    return 200, complete_reply(result)
 
 
 class ModelStub:
@@ -23,6 +68,8 @@ class ModelStub:
         self.reply = reply
         self.models = list(models)
         self.requests = []
+        self.shows = []
+        self.show = {"details": {"format": "gguf"}, "capabilities": ["completion"]}
         self.gets = []
         stub = self
 
@@ -44,11 +91,17 @@ class ModelStub:
                 stub.gets.append(self.path)
                 if self.path == "/api/tags":
                     self.send_json(200, {"models": stub.models})
+                elif self.path == "/api/version":
+                    self.send_json(200, {"version": "synthetic-runtime"})
                 else:
                     self.send_json(404, {"error": "not found"})
 
             def do_POST(self):
                 payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path == "/api/show":
+                    stub.shows.append(payload)
+                    self.send_json(200, stub.show)
+                    return
                 stub.requests.append({"path": self.path, "payload": payload})
                 result = stub.reply(payload)
                 try:

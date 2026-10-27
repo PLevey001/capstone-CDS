@@ -77,3 +77,16 @@ def migrate_records(db):
     )""")
     db.execute("CREATE INDEX IF NOT EXISTS records_run ON parsed_records(evidence_id,run_id,id)")
     db.execute("CREATE INDEX IF NOT EXISTS records_time ON parsed_records(run_id,event_time_us,id)")
+
+
+def migrate_briefs(db):
+    # Same transaction as history/records. Earlier ephemeral briefs have no rows to migrate.
+    db.execute("""CREATE TABLE IF NOT EXISTS case_briefs (
+        id TEXT PRIMARY KEY, case_id TEXT NOT NULL REFERENCES cases(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL CHECK(version > 0), input_digest TEXT NOT NULL,
+        created_at TEXT NOT NULL, document TEXT NOT NULL,
+        UNIQUE(case_id, version)
+    )""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS immutable_case_briefs
+        BEFORE UPDATE ON case_briefs BEGIN
+        SELECT RAISE(ABORT, 'Saved case briefs are immutable'); END""")

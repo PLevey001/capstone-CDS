@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 
 type Fixture = {
   case: { id: string; name: string };
@@ -32,11 +33,11 @@ test("fact sheet needs no model and says why wording is unavailable", async ({
 }) => {
   const fixture = await openBrief(page, "missing");
   const facts = page.locator(".brief-facts li");
-  await expect(facts).toHaveCount(6);
+  await expect(facts).toHaveCount(7);
   await expect(facts.first()).toHaveText(
     `F1Case "${fixture.case.name}" has 1 evidence source; 1 of them has saved analysis results.`,
   );
-  await expect(facts.nth(3)).toContainText(
+  await expect(facts.nth(4)).toContainText(
     'The inventory of "fixture.img" lists 205 file entries and 0 directories',
   );
   await expect(page.getByText("Local model unavailable")).toBeVisible();
@@ -65,7 +66,9 @@ test("fact sheet needs no model and says why wording is unavailable", async ({
   await page.getByRole("button", { name: "Timeline", exact: true }).click();
   await page.getByRole("button", { name: "Case brief", exact: true }).click();
   await expect(failure).toBeVisible();
-  await expect(page.getByRole("list", { name: "Overview" })).toHaveCount(0);
+  await expect(page.getByRole("list", { name: "Overall summary" })).toHaveCount(
+    0,
+  );
   // A fact opens the evidence it describes.
   await page
     .getByRole("button", { name: "Open the source of fact F2" })
@@ -73,61 +76,232 @@ test("fact sheet needs no model and says why wording is unavailable", async ({
   await expect(page.getByRole("dialog")).toContainText("fixture.img");
 });
 
-test("wording cites facts, flags unsupported numbers, and goes stale when results change", async ({
+test("invalid assessment is rejected whole without saving a partial version", async ({
   page,
 }) => {
   const fixture = await openBrief(page, "flagged");
   await page.getByRole("button", { name: "Generate brief" }).click();
-  const overview = page.getByRole("list", { name: "Overview" });
-  await expect(overview.getByRole("listitem")).toHaveCount(2);
-  await expect(overview).not.toContainText("on purpose");
-  const flagged = overview.getByRole("listitem").nth(1);
-  await expect(flagged).toContainText("The image lists 999 file entries.");
-  await expect(flagged).toContainText(
-    "Contains a number that is not in its cited facts.",
+  await expect(page.getByRole("alert")).toContainText("No brief was saved");
+  await expect(page.getByRole("link", { name: "Download JSON" })).toHaveCount(
+    0,
   );
-  await expect(overview.getByRole("listitem").first()).not.toContainText(
-    "Contains a number",
-  );
+  expect(
+    await (
+      await page.request.get(`/api/cases/${fixture.case.id}/briefs`)
+    ).json(),
+  ).toEqual([]);
+  await page.request.post("/test/model/ready", { headers });
+  await page.getByRole("button", { name: "Generate brief" }).click();
   await expect(
-    page.getByRole("list", { name: "Look at first" }).getByRole("listitem"),
-  ).toHaveText(/Coverage was not recorded, so check what was examined\./);
-  await expect(page.locator(".brief-provenance")).toContainText(
-    "3 statements shown, 1 withheld because they cited no fact",
-  );
-  // A citation points at the fact it was built from.
-  await flagged.getByRole("button", { name: "Show fact F4" }).click();
-  await expect(page.locator("#brief-fact-F4")).toHaveClass(/focused/);
-  await expect(page.locator(".brief-facts li.focused")).toHaveCount(1);
-  // The wording survives leaving the tab, and generating is recorded in the activity log.
-  await page.getByRole("button", { name: "Activity log", exact: true }).click();
-  await expect(page.getByText("case brief generated")).toBeVisible();
-  await page.getByRole("button", { name: "Case brief", exact: true }).click();
-  await expect(overview.getByRole("listitem")).toHaveCount(2);
-  await expect(
-    page.getByRole("button", { name: "Generate again" }),
-  ).toBeEnabled();
-  // It is not shown for another case.
-  await page
-    .getByRole("button", { name: fixture.other.name, exact: true })
-    .click();
-  await page.getByRole("button", { name: "Case brief", exact: true }).click();
-  await expect(overview).toHaveCount(0);
-  await expect(
-    page.getByText("Available once a source has saved analysis results."),
+    page.getByRole("heading", { name: "Saved version 1", exact: true }),
   ).toBeVisible();
+  await expect(page.getByRole("note")).toContainText(
+    "Inferences are hypotheses, not evidence",
+  );
+  await expect(
+    page.getByRole("list", { name: "Inferences / hypotheses", exact: true }),
+  ).toContainText("Alternative explanations");
+  await expect(
+    page.getByRole("list", { name: "Inferences / hypotheses", exact: true }),
+  ).toContainText("Uncertainty and limitations");
+});
+
+test("saved JSON survives reload, offline reading, reanalysis and version selection", async ({
+  page,
+}) => {
+  const fixture = await openBrief(page, "ready");
+  await page.getByRole("button", { name: "Generate brief" }).click();
+  const downloadEvent = page.waitForEvent("download");
+  await page.getByRole("link", { name: "Download JSON" }).click();
+  const download = await downloadEvent;
+  expect(download.suggestedFilename()).toMatch(
+    /^case-brief-[a-f0-9-]+-v1\.json$/,
+  );
+  const bytes = await readFile((await download.path())!, "utf-8");
+  const document = JSON.parse(bytes);
+  expect(document.schema_version).toBe("cds.case-assessment.v1");
+  expect(document.version).toBe(1);
+  expect(
+    document.facts.some(
+      (fact: { run_id: string }) => fact.run_id === fixture.run,
+    ),
+  ).toBeTruthy();
+  await page.request.post("/test/model/missing", { headers });
+  await page.reload();
+  // Reload initially selects the newest case (the empty fixture), not the previously open one.
   await page
     .getByRole("button", { name: fixture.case.name, exact: true })
     .click();
-  await page.getByRole("button", { name: "Case brief", exact: true }).click();
-  await expect(overview.getByRole("listitem")).toHaveCount(2);
-  // New saved results renumber the fact sheet, so the old wording is marked and its citations stop.
-  await page.request.post(`/test/finish/${fixture.source}`, { headers });
   await expect(
-    page.getByText("Saved results changed after this brief was worded."),
+    page.getByRole("heading", { name: fixture.case.name, exact: true }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Case brief", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Saved version 1", exact: true }),
   ).toBeVisible();
   await expect(
-    flagged.getByRole("button", { name: "Show fact F4" }),
+    page.getByText("Local model unavailable", { exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download JSON" })).toBeVisible();
+  const stored = await page.request.get(
+    `/api/cases/${fixture.case.id}/briefs/${document.id}/download`,
+  );
+  expect(await stored.text()).toBe(bytes);
+  await page.request.post(`/test/finish/${fixture.source}`, { headers });
+  await expect(
+    page.getByText(/Stale brief: case name, sources or results changed/),
+  ).toBeVisible();
+  const cited = page
+    .getByRole("list", { name: "Overall summary", exact: true })
+    .getByRole("button", { name: "Show fact F1" });
+  await cited.click();
+  await expect(page.locator("#brief-fact-F1")).toHaveClass(/focused/);
+  expect(
+    await (
+      await page.request.get(
+        `/api/cases/${fixture.case.id}/briefs/${document.id}/download`,
+      )
+    ).text(),
+  ).toBe(bytes);
+  await page.request.post("/test/model/ready", { headers });
+  await page.getByRole("button", { name: "Check again" }).click();
+  await page.getByRole("button", { name: "Generate again" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Saved version 2", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByLabel("Saved brief version").locator("option"),
+  ).toHaveCount(2);
+  await page.getByLabel("Saved brief version").selectOption(document.id);
+  await expect(
+    page.getByRole("heading", { name: "Saved version 1", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByText(/Stale brief:/)).toBeVisible();
+  await page
+    .getByRole("button", { name: fixture.other.name, exact: true })
+    .click();
+  await expect(page.getByRole("link", { name: "Download JSON" })).toHaveCount(
+    0,
+  );
+});
+
+test("case chat explicitly selects a saved brief and distinguishes prior assessment references", async ({
+  page,
+}) => {
+  const fixture = await openBrief(page, "ready");
+  await page.getByRole("button", { name: "Generate brief" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Saved version 1", exact: true }),
+  ).toBeVisible();
+  const [version] = await (
+    await page.request.get(`/api/cases/${fixture.case.id}/briefs`)
+  ).json();
+  await page
+    .getByRole("button", { name: "Learn with AI", exact: true })
+    .click();
+  await page.getByLabel("Learning mode").selectOption("case");
+  await expect(page.getByLabel("Assessment for this conversation")).toHaveValue(
+    "",
+  );
+  await expect(page.getByText(/Case observations use a fresh/)).toBeVisible();
+  await page
+    .getByLabel("Assessment for this conversation")
+    .selectOption(version.id);
+  await expect(
+    page.getByText(/historical, pinned fact snapshot/),
+  ).toBeVisible();
+  await expect(page.getByText(/Case observations use a fresh/)).toHaveCount(0);
+  await page
+    .getByLabel("Your question", { exact: true })
+    .fill("Why was this inference suggested?");
+  const request = page.waitForRequest((r) => r.url().endsWith("/chat"));
+  await page.getByRole("button", { name: "Send question" }).click();
+  expect((await request).postDataJSON()).toMatchObject({
+    mode: "case",
+    brief_id: version.id,
+    history: [],
+  });
+  await expect(page.locator(".learn-turn")).toContainText(
+    "Prior unverified assessment",
+  );
+  await expect(page.locator(".learn-turn")).toContainText("Evidence fact · F1");
+  await page.locator(".learn-assessment-reference summary").click();
+  await expect(page.locator(".learn-assessment-reference")).toContainText(
+    "Saved brief version 1",
+  );
+  await page.getByLabel("Learning mode").selectOption("concepts");
+  await expect(page.locator(".learn-turn")).toHaveCount(0);
+  await expect(page.getByLabel("Assessment for this conversation")).toHaveCount(
+    0,
+  );
+  await page.request.post(`/test/finish/${fixture.source}`, { headers });
+  // Wait for the app's evidence poll to consume the new run before selecting a chat mode.
+  // Otherwise its normal source-revision reset can remount LearnPanel during this assertion.
+  await expect(
+    page
+      .locator(".stat-card")
+      .filter({ hasText: "File artifacts indexed" })
+      .locator(".stat-number"),
+  ).toHaveText("1");
+  await page.getByRole("button", { name: "Case brief", exact: true }).click();
+  await expect(page.getByText(/Stale brief:/)).toBeVisible();
+  await page
+    .getByRole("button", { name: "Learn with AI", exact: true })
+    .click();
+  await page.getByLabel("Learning mode").selectOption("case");
+  const selection = page.getByLabel("Assessment for this conversation");
+  const staleOption = selection.locator(`option[value="${version.id}"]`);
+  // Option disabled is a DOM property; Playwright's disabled matcher can retarget the enclosing label's select.
+  await expect(staleOption).toHaveJSProperty("disabled", true);
+  await selection.focus();
+  await selection.press("ArrowDown");
+  await selection.press("Enter");
+  await expect(selection).toHaveValue("");
+  await expect(page.getByLabel("Learning mode")).toHaveValue("case");
+  const forced = await page.request.post(`/api/cases/${fixture.case.id}/chat`, {
+    headers,
+    data: {
+      mode: "case",
+      message: "Explain the old brief",
+      brief_id: version.id,
+    },
+  });
+  expect(forced.status()).toBe(409);
+  expect((await forced.json()).detail).toContain("stale");
+});
+
+test("failed current-fact refresh keeps historical references and download usable", async ({
+  page,
+}) => {
+  const fixture = await openBrief(page, "ready");
+  await page.getByRole("button", { name: "Generate brief" }).click();
+  const citation = page.getByRole("button", {
+    name: "Show fact F1",
+    exact: true,
+  });
+  await expect(citation).toBeEnabled();
+  await page.route(`**/api/cases/${fixture.case.id}/brief`, async (route) => {
+    if (route.request().method() !== "GET") return route.continue();
+    await route.fulfill({
+      status: 503,
+      json: { detail: "Synthetic fact refresh failed" },
+    });
+  });
+  await page.getByRole("button", { name: "Rename case", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("textbox")
+    .fill("Renamed learning case");
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Save name" })
+    .click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Synthetic fact refresh failed",
+  );
+  await expect(citation).toBeEnabled();
+  await expect(page.getByRole("link", { name: "Download JSON" })).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Generate again" }),
   ).toBeDisabled();
-  await expect(page.locator(".brief-facts li.focused")).toHaveCount(0);
 });

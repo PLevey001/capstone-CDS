@@ -8,9 +8,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 import cds.case_brief as case_brief
+from cds import local_model, prompt_guidance
 from cds.config import Settings
 from cds.main import create_app
-from tests.model_stub import LOCAL_MODEL, ModelStub
+from tests.model_stub import LOCAL_MODEL, ModelStub, assessment, complete_reply
 
 HEADERS = {"X-CDS-Request": "local-ui"}
 SHA = "ab12" * 16
@@ -19,7 +20,7 @@ MICROSECONDS = 1_000_000
 
 def reply_with(content, status=200):
     body = content if isinstance(content, str) else json.dumps(content)
-    return lambda payload: (status, {"message": {"role": "assistant", "content": body}})
+    return lambda payload: (status, complete_reply(body))
 
 
 def unused_port():
@@ -88,17 +89,22 @@ def test_fact_sheet_is_computed_from_saved_results_without_a_model(workspace):
     assert text["case"] == ['Case "Brief case" has 2 evidence sources; 1 of them has saved analysis results.']
     identity, pending = text["source"]
     assert identity.startswith('Source "usb.img" is a raw disk image of 9 bytes, imported into CDS ')
-    assert identity.endswith(f"Its SHA-256 begins {SHA[:12]}. Latest saved result: run 1, completed.")
+    assert identity.endswith(f"Its analysis SHA-256 begins {SHA[:12]}; no acquisition-reference comparison is reported here. "
+                             "Latest saved result: run 1, completed.")
     assert pending.startswith('Source "notes.txt" is a logical file of 9 bytes')
     assert pending.endswith("It has no saved analysis result yet (job queued).")
     assert text["inventory"] == ['The inventory of "usb.img" lists 8 file entries and 1 directory; '
                                  "7 file entries are marked deleted."]
     assert text["coverage"] == ['Coverage for "usb.img" is marked partial. 1 step did not complete, starting with '
                                 '"Filesystem inventory": Listing stopped at the artifact limit.']
+    assert text["source_scope"] == ['Saved scope/detail for "usb.img": test',
+                                     'Saved scope/detail for "usb.img": ok',
+                                     'Saved scope/detail for "usb.img": Listing stopped at the artifact limit.']
     # Itemized lists are capped and say what they left out.
     assert len(text["deleted"]) == 6
     assert text["deleted"][0] == ('Deleted file entry "/gone-0.txt (deleted)" (60 bytes) is listed in "usb.img". '
-                                  "A deleted entry does not show who deleted the file or when.")
+                                  "A deleted entry does not show who deleted the file or when. "
+                                  "Recovery outcome is not reported by this inventory fact.")
     assert text["deleted"][-1] == '"usb.img" lists 2 more deleted file entries that are not itemized in this fact sheet.'
     assert text["time_range"] == ['File timestamps recorded in "usb.img" range from 2023-11-14 22:13 UTC to '
                                   "2023-11-15 00:13 UTC. Filesystem timestamps do not prove user actions."]
@@ -106,12 +112,14 @@ def test_fact_sheet_is_computed_from_saved_results_without_a_model(workspace):
         '"usb.img" has 4 browser visit records parsed from 1 file, with times from 2023-11-15 01:00 UTC to 2023-11-15 01:03 UTC.',
         '"usb.img" has 1 Registry value record parsed from 1 file; Registry values carry no timestamps.',
         '"usb.img" has 3 Windows event records parsed from 1 file, with times from 2023-11-15 03:46 UTC to 2023-11-15 03:46 UTC.']
-    assert text["browser"] == ['Browser visits in "usb.img" cover 2 hosts; the most visited: example.com (2 visits), '
-                               "files.test (1 visit). Visits may include synced or imported activity."]
+    assert text["browser"] == ['Browser visits in "usb.img" have 2 hosts classified; the most visited: example.com (2 visits), '
+                               "files.test (1 visit). 1 visit excluded from host counts: 0 truncated URLs, 0 missing URLs, "
+                               "1 unclassifiable URL. Visits may include synced or imported activity."]
     assert text["events"] == ['Most frequent Windows events in "usb.img": Event 4624 · Security (2), Event 1102 · Eventlog (1).']
     assert text["scope"] == [case_brief.SCOPE_NOTE] and facts[-1]["kind"] == "scope"
     # Limits and totals come before itemized entries.
-    assert [fact["kind"] for fact in facts] == (["case", "source", "coverage", "inventory", "time_range"] + ["records"] * 3
+    assert [fact["kind"] for fact in facts] == (["case", "source", "coverage"] + ["source_scope"] * 3
+                                                + ["inventory", "time_range"] + ["records"] * 3
                                                 + ["browser", "events"] + ["deleted"] * 6 + ["source", "scope"])
     # Facts link back to what they describe; deleted entries open their own artifact.
     artifacts = client.get(f"/api/evidence/{image}/artifacts", params={"q": "gone-0"}).json()["items"]
@@ -140,7 +148,7 @@ def test_evidence_text_is_one_bounded_printable_line(tmp_path):
         assert lines[0] == "Facts:" and sum(line.startswith("F1: ") for line in lines) == 1
 
 
-def test_fact_sheet_names_every_source_before_detailing_any(tmp_path):
+def test_full_sheet_keeps_all_sources_and_distinguishes_unmeasured_inventory(tmp_path):
     def source(number, extra):
         return {"id": f"s{number}", "name": f"disk-{number}.img", "kind": "raw_image", "size": 1, "imported_at": None,
                 "run_id": f"r{number}", "job_status": "completed", "run_number": 1, "run_status": "completed",
@@ -149,68 +157,53 @@ def test_fact_sheet_names_every_source_before_detailing_any(tmp_path):
                 "deleted": [{"id": index, "path": f"/d{index}", "size": 1} for index in range(extra)],
                 "first_file_time": None, "last_file_time": None, "records": [], "hosts": [], "host_total": 0, "events": []}
 
-    facts = case_brief.build_facts({"case": {"name": "Large"}, "sources": [source(number, 5) for number in range(20)]})
-    kinds = [fact["kind"] for fact in facts]
-    assert len(facts) == case_brief.MAX_FACTS and kinds.count("source") == 20
-    # Six sources fit whole (an inventory fact and five deleted entries each); the seventh keeps its totals first.
-    assert kinds[:8] == ["case", "source", "inventory"] + ["deleted"] * 5
-    assert kinds[43:47] == ["source", "inventory", "deleted", "source"] and set(kinds[47:-1]) == {"source"}
-    assert facts[-1]["text"].endswith(" This fact sheet is capped at 60 facts: 1 listed source has only part of "
-                                      "its detail here; 13 listed sources have no detail here.")
-    crowded = case_brief.build_facts({"case": {"name": "Huge"}, "sources": [source(number, 0) for number in range(90)]})
-    assert len(crowded) == case_brief.MAX_FACTS and crowded[-1]["text"].endswith(
-        " capped at 60 facts: 32 sources are not listed; 58 listed sources have no detail here.")
+    facts = case_brief.build_facts({"case": {"name": "Large"}, "sources": [source(number, 5) for number in range(30)]})
+    assert len(facts) > case_brief.MAX_FACTS
+    assert sum(fact["kind"] == "source" for fact in facts) == 30
+    assert facts[-1]["text"] == case_brief.SCOPE_NOTE
     failed = source(0, 0) | {"error": "ValueError: unreadable", "coverage": None}
     assert [fact["text"] for fact in case_brief.source_facts(failed)[1:3]] == [
         'Analysis of "disk-0.img" failed: ValueError: unreadable',
-        'The inventory of "disk-0.img" lists 0 file entries and 0 directories; 0 file entries are marked deleted.']
-    assert case_brief.source_facts(source(0, 0) | {"coverage": None})[1]["text"] == 'Coverage for "disk-0.img" was not recorded.'
+        'The inventory of "disk-0.img" was not measured; file counts are unavailable.']
+    measured = source(0, 0) | {"coverage": {"steps": [{"id": "filesystem:0", "status": "complete"}]}}
+    assert "0 file entries" in next(fact["text"] for fact in case_brief.source_facts(measured) if fact["kind"] == "inventory")
 
 
-def test_brief_shows_only_statements_that_cite_real_facts(workspace):
-    client, _, stub, (case, _, _, _) = workspace
-    facts = client.get(f"/api/cases/{case}/brief").json()["facts"]
+def test_brief_saves_only_complete_assessments_with_real_references(workspace):
+    client, store, stub, (case, _, _, _) = workspace
+    sheet = client.get(f"/api/cases/{case}/brief").json()
+    facts = sheet["facts"]
     inventory = next(fact["id"] for fact in facts if fact["kind"] == "inventory")
-    stub.reply = reply_with({
-        "overview": [
-            {"statement": "The image lists 8 file entries and 1 directory.", "facts": [inventory]},
-            {"statement": "A suspect wiped 12 files to hide evidence.", "facts": [inventory]},
-            {"statement": "Cites a fact that does not exist.", "facts": ["F999"]},
-            {"statement": "Cites nothing at all.", "facts": []},
-            "not an object",
-            {"statement": "   ", "facts": ["F1"]},
-            {"statement": f"Mentions {inventory} by ID\nand keeps one line.", "facts": [inventory, inventory, "F999", 7]},
-        ] + [{"statement": f"Extra statement {number}.", "facts": ["F1"]} for number in range(9)],
-        "review": [{"statement": "Look at the deleted entries first.", "facts": ["F1"]}],
-        "verdict": "ignored",
-    })
+    valid = assessment("The image lists 8 file entries and 1 directory.", inventory)
+    stub.reply = reply_with(valid | {"observations": [{"statement": "Unsupported number 999.", "facts": [inventory]}]})
+    assert client.post(f"/api/cases/{case}/brief", headers=HEADERS).status_code == 502
+    assert store.saved_briefs(case) == []
+    stub.requests.clear()
+    stub.reply = reply_with(valid)
     response = client.post(f"/api/cases/{case}/brief", headers=HEADERS)
-    assert response.status_code == 200
-    brief = response.json()
-    assert brief["facts"] == facts and brief["model"] == "llama3.2:3b" and brief["withheld"] == 4
-    assert brief["overview"][:3] == [
-        {"text": "The image lists 8 file entries and 1 directory.", "facts": [inventory], "numbers_match": True},
-        # Wording the facts cannot settle is still shown, but a number its facts lack is flagged.
-        {"text": "A suspect wiped 12 files to hide evidence.", "facts": [inventory], "numbers_match": False},
-        {"text": f"Mentions {inventory} by ID and keeps one line.", "facts": [inventory], "numbers_match": True}]
-    assert len(brief["overview"]) == case_brief.MAX_OVERVIEW
-    assert brief["review"] == [{"text": "Look at the deleted entries first.", "facts": ["F1"], "numbers_match": True}]
-    # The model is sent the fact sheet and nothing else from the workspace.
+    assert response.status_code == 200, response.text
+    envelope = response.json()
+    brief = envelope["document"]
+    assert brief["facts"] == facts and brief["model"] == "llama3.2:3b" and brief["withheld"] == 0
+    assert brief["overall_summary"][0] == {
+        "id": "A-overall_summary-1", "text": "The image lists 8 file entries and 1 directory.",
+        "facts": [inventory], "verification": "unverified"}
+    assert brief["model_digest"] == LOCAL_MODEL["digest"] and brief["runtime_version"] == "synthetic-runtime"
+    assert brief["version"] == 1 and envelope["stale"] is False
     (request,) = stub.requests
     payload = request["payload"]
     assert request["path"] == "/api/chat" and payload["model"] == "llama3.2:3b" and payload["stream"] is False
     assert payload["options"]["temperature"] == 0
     assert [message["role"] for message in payload["messages"]] == ["system", "user"]
-    assert payload["messages"][0]["content"] == case_brief.SYSTEM_PROMPT
-    assert payload["messages"][1]["content"] == case_brief.build_prompt(facts)
-    assert payload["format"]["properties"]["overview"]["items"]["properties"]["facts"]["items"]["enum"] == [
-        fact["id"] for fact in facts]
+    assert payload["messages"][0]["content"] == prompt_guidance.get_prompt("brief").text
+    assert payload["messages"][1]["content"].startswith(case_brief.build_prompt(brief["model_facts"]))
+    assert payload["format"]["$defs"]["item"]["properties"]["facts"]["items"]["enum"] == [
+        fact["id"] for fact in brief["model_facts"]]
     assert str(client.app.state.store.root) not in json.dumps(payload)
-    # Generating is an activity-log entry; the wording itself is not stored.
     event = client.get(f"/api/cases/{case}/audit").json()[0]
-    assert event["action"] == "case_brief_generated"
-    assert event["detail"] == (f"Model llama3.2:3b worded 6 statements from {len(facts)} facts "
-                               f"(fact sheet {brief['facts_digest'][:12]}); 4 withheld")
+    assert event["action"] == "case_brief_saved"
+    assert brief["input_digest"] in event["detail"]
+    assert "8 file entries" not in event["detail"]  # Prose lives only in the immutable JSON row.
 
 
 @pytest.mark.parametrize("content,message", [
@@ -218,14 +211,14 @@ def test_brief_shows_only_statements_that_cite_real_facts(workspace):
     ("[]", "unexpected structure"),
     ("   ", "empty reply"),
     (json.dumps({"overview": [{"statement": "No citation.", "facts": ["F999"]}], "review": "none"}),
-     "no statement tied to the fact sheet"),
+     "unexpected structure"),
 ])
 def test_unusable_model_replies_are_errors_not_briefs(workspace, content, message):
     client, _, stub, (case, _, _, _) = workspace
     stub.reply = reply_with(content)
     response = client.post(f"/api/cases/{case}/brief", headers=HEADERS)
     assert response.status_code == 502 and message in response.json()["detail"]
-    assert all(event["action"] != "case_brief_generated" for event in client.get(f"/api/cases/{case}/audit").json())
+    assert all(event["action"] != "case_brief_saved" for event in client.get(f"/api/cases/{case}/audit").json())
 
 
 def test_model_server_failures_are_reported_plainly(workspace):
@@ -234,29 +227,21 @@ def test_model_server_failures_are_reported_plainly(workspace):
     stub.reply = lambda payload: (500, {"error": "model crashed\nbadly"})
     response = client.post(route, headers=HEADERS)
     assert response.status_code == 502
-    assert response.json()["detail"].startswith("The local model server answered with an error (500): ")
+    assert response.json()["detail"] == "The local model server answered with an error (500)."
     assert "\n" not in response.json()["detail"]
     stub.reply = lambda payload: (200, b"<html>not json</html>")
     assert client.post(route, headers=HEADERS).json()["detail"] == "The local model server sent a reply that is not JSON."
-    stub.reply = lambda payload: (200, b"x" * (case_brief.RESPONSE_BYTES + 1))
+    stub.reply = lambda payload: (200, b"x" * (local_model.RESPONSE_BYTES + 1))
     assert client.post(route, headers=HEADERS).json()["detail"] == "The local model server sent more data than CDS accepts."
-    stub.reply = lambda payload: (200, {"message": None})
-    assert "empty reply" in client.post(route, headers=HEADERS).json()["detail"]
+    stub.reply = lambda payload: (200, complete_reply("") | {"message": None})
+    assert "unexpected message" in client.post(route, headers=HEADERS).json()["detail"]
 
 
-def test_plain_json_is_requested_when_the_schema_is_rejected(workspace):
+def test_arbitrary_bad_request_is_not_retried(workspace):
     client, _, stub, (case, _, _, _) = workspace
-
-    def reject_schema(payload):
-        if payload["format"] != "json":
-            return 400, {"error": "invalid format"}
-        return reply_with({"overview": [{"statement": "Worded without a schema.", "facts": ["F1"]}], "review": []})(payload)
-
-    stub.reply = reject_schema
-    brief = client.post(f"/api/cases/{case}/brief", headers=HEADERS).json()
-    assert [item["text"] for item in brief["overview"]] == ["Worded without a schema."]
-    assert [request["payload"]["format"] == "json" for request in stub.requests] == [False, True]
-    assert stub.requests[0]["payload"]["messages"] == stub.requests[1]["payload"]["messages"]
+    stub.reply = lambda payload: (400, {"error": "invalid format"})
+    assert client.post(f"/api/cases/{case}/brief", headers=HEADERS).status_code == 502
+    assert len(stub.requests) == 1
 
 
 def test_status_explains_why_a_brief_cannot_be_generated(tmp_path):
@@ -291,8 +276,8 @@ def test_status_explains_why_a_brief_cannot_be_generated(tmp_path):
 
 def test_untagged_model_name_matches_its_latest_tag(tmp_path):
     with ModelStub(models=[{**LOCAL_MODEL, "name": "mistral:latest", "model": "mistral:latest"}]) as stub:
-        assert case_brief.status(Settings(tmp_path, ai_url=stub.url, ai_model="mistral"))["available"] is True
-        assert case_brief.status(Settings(tmp_path, ai_url=stub.url, ai_model="mistral:7b"))["available"] is False
+        assert local_model.status(Settings(tmp_path, ai_url=stub.url, ai_model="mistral"))["available"] is True
+        assert local_model.status(Settings(tmp_path, ai_url=stub.url, ai_model="mistral:7b"))["available"] is False
 
 
 def test_model_server_must_be_on_this_machine(tmp_path, monkeypatch):
@@ -312,8 +297,8 @@ def test_model_server_must_be_on_this_machine(tmp_path, monkeypatch):
     settings = Settings.from_env()
     assert (settings.ai_url, settings.ai_model, settings.ai_timeout) == ("http://localhost:9999", "phi3:mini", 45)
     # The address is checked again at the point of use, not only when settings are read.
-    with pytest.raises(case_brief.BriefError, match="not on this machine"):
-        case_brief.call("http://203.0.113.9:11434", "/api/tags")
+    with pytest.raises(local_model.ModelError, match="not on this machine"):
+        local_model.call("http://203.0.113.9:11434", "/api/tags")
 
 
 def test_facts_are_not_sent_through_proxies_or_redirects(workspace, monkeypatch):
@@ -340,7 +325,7 @@ def test_slow_model_times_out_and_one_brief_runs_at_a_time(tmp_path):
     def held(payload):
         started.set()
         release.wait(10)
-        return reply_with({"overview": [{"statement": "Done.", "facts": ["F1"]}], "review": []})(payload)
+        return reply_with(assessment("Done."))(payload)
 
     with ModelStub(reply=held) as stub:
         app = create_app(Settings(tmp_path / "busy", ai_url=stub.url), start_workers=False)
@@ -369,7 +354,7 @@ def test_slow_model_times_out_and_one_brief_runs_at_a_time(tmp_path):
             for _ in range(2):
                 response = client.post(f"/api/cases/{case}/brief", headers=HEADERS)
                 assert response.status_code == 504
-                assert response.json()["detail"] == "The local model did not answer within 1 seconds."
+                assert response.json()["detail"] == "The local AI operation exceeded its time limit. Try again."
 
 
 def test_brief_needs_a_case_saved_results_and_the_request_guard(workspace):
@@ -393,9 +378,10 @@ def test_number_comparison_ignores_formatting_but_not_values():
 
     def match(statement):
         content = json.dumps({"overview": [{"statement": statement, "facts": ["F1"]}], "review": []})
-        return case_brief.check_statements(content, [fact])[0][0]["numbers_match"]
+        return case_brief.check_statements(content, [fact])[0][0]["verification"] == "unverified"
 
     assert match("There are 2048 files, imported on 16/9/2026 at 9:05.")
     assert match("Fact F1 lists files and one directory.")
-    assert not match("There are 2049 files.")
-    assert not match("About 2.0 thousand files.")
+    for text in ("There are 2049 files.", "About 2.0 thousand files."):
+        with pytest.raises(local_model.ModelError):
+            match(text)

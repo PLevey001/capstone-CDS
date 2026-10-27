@@ -14,6 +14,8 @@ demo-evidence/
 /docs/*
 !/docs/acceptance.md
 !/docs/acceptance-performance.json
+!/docs/local-ai.md
+!/docs/ai-guidance/
 *.egg-info/
 # Local configuration and credentials. Keep examples placeholder-only.
 .env
