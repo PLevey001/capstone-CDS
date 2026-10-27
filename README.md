@@ -6,6 +6,8 @@ Supported content includes Chrome/Chromium and Firefox history snapshots, Window
 
 The interface offers file inventory, saved records, coverage diagnostics, analysis history, downloads and CSV/JSON exports. One paginated UTC timeline combines filesystem MAC times, browser visits, Registry key last-write times and event creation times. Registry values do not receive invented timestamps. Reanalysis preserves historical results; downloads use only the current saved run. Coverage describes what was examined and any gaps, independently of whether a job finished.
 
+Optional **AI case brief** and **Learn with AI** use a local Ollama model. Each successful brief generation saves a new immutable JSON assessment with an overall summary, observations, tentative inferences and review suggestions. Select saved versions and download their exact JSON, including while AI is unavailable. Learn with AI supports educational questions and case discussion with an explicitly selected current brief. **All generated prose is unverified; citations are references, not proof.** The computed fact sheet and reviewed concept notes remain available without a model. See [local AI setup, use, privacy and limitations](docs/local-ai.md) and the [tested combined-demo configuration](docs/local-ai.md#tested-combined-demo-configuration). AI is never required for normal forensic functions. The [shared v0.2 model guidance](docs/ai-guidance/README.md) documents the compact runtime prompts, authored examples and evaluation process.
+
 The [combined acceptance case and numbered walkthrough](docs/acceptance.md) define the demonstrated scope and limits. **E01 is deliberately excluded:** the local TSK 4.12.1/libewf 20140816 combination segfaults on EWF input, so no EWF analysis path was added. Segmented uploads, unallocated carving, encryption, Registry log replay and rendered EVTX messages are not supported. This is not a certified forensic tool or a claim of unlimited image scale.
 
 ## Setup
@@ -50,7 +52,7 @@ Use Linux or Ubuntu in WSL2 on Windows. Run these commands in a Linux/WSL termin
    python3 scripts/run.py
    ```
 
-   Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Stop with Ctrl+C. The launcher uses the project's virtual environment. Setup verification and the restrictions of this session are recorded in [acceptance verification limits](docs/acceptance.md#exclusions-and-verification-limits); a fresh network install was blocked here, not silently treated as verified.
+   Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Stop with Ctrl+C. The launcher uses the project's virtual environment. After initial setup, this is the normal startup command; no long environment invocation is required. Optionally copy `.env.example` to ignored `.env` and set your local model, context (8192–32768 tokens), timeout and relative data directory. Shell variables take precedence. An explicit `CDS_AI_SERVICE` can start one existing user service, with a bounded readiness wait after startup; CDS never installs or downloads models or stops that service at exit. Missing AI does not prevent app startup. Setup verification and the restrictions of this session are recorded in [acceptance verification limits](docs/acceptance.md#exclusions-and-verification-limits); a fresh network install was blocked here, not silently treated as verified.
 
 ## Try the combined case
 
