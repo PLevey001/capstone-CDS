@@ -46,6 +46,30 @@ Start CDS normally. The AI panels show model availability and offer **Check agai
 
 Use a model/runtime supporting the documented schema chat contract. There is no claim of compatibility with every Ollama version or custom model template. Model discovery uses [tags](https://docs.ollama.com/api/tags) and [show](https://docs.ollama.com/api-reference/show-model-details). No runtime is required by automated tests. Do not expose either service to a network, configure reverse proxies to it, or substitute a remotely forwarded loopback endpoint. The client makes direct connections without system proxies and rejects redirects.
 
+## Tested combined-demo configuration
+
+The combined demo's saved-brief questions and short follow-ups were exercised with **Qwen2.5:7b**, Ollama **0.40.6**, a **32768-token context**, and a **300-second timeout**. This is a tested configuration, not a guarantee of factual accuracy, identical output, or hardware-independent latency. The smaller defaults above remain unchanged and are not the tested combined-demo configuration.
+
+With the loopback-only Ollama service running as described above, install the model once:
+
+```bash
+OLLAMA_HOST=127.0.0.1:11434 ollama pull qwen2.5:7b
+```
+
+Create the ignored repo-root `.env` if it does not exist, or edit the corresponding keys in your existing file (do not duplicate keys or overwrite your workspace setting):
+
+```dotenv
+CDS_DATA_DIR=data
+CDS_AI_URL=http://127.0.0.1:11434
+CDS_AI_MODEL=qwen2.5:7b
+CDS_AI_CONTEXT=32768
+CDS_AI_TIMEOUT=300
+```
+
+Keep `CDS_DATA_DIR` pointed at your existing workspace if you already have cases. This example requires no user-service name or machine-specific path. Start normally with `python3 scripts/run.py`; in a second terminal, use `.venv/bin/python scripts/import_demo.py --acceptance` only if you need a new synthetic case. Select that case, generate a saved brief, then explicitly select it in case chat before asking a question and a follow-up. Existing current saved briefs can also be used. Shell variables override `.env`, so check the startup model banner and the UI's AI status if settings differ.
+
+Record your actual model digest and Ollama version when comparing results: model tags can change. The tested Qwen digest was `845dbda0ea48ed749caafd9e6037047aa19acfcfd82e704d7ca97d631a0b697e`. Memory needs and response time depend on hardware; allow for a larger model and context than the defaults. Long histories can still exceed the bounded request budget, and generated answers still require human review.
+
 ## Lifetime, boundaries and limits
 
 Case questions are rejected before model generation if the bounded context would omit any entire evidence source. Review the full computed fact sheet, clear history, shorten the question, or deselect the brief. Below 32768, `CDS_AI_CONTEXT` can be increased up to 32768 only if the installed model supports it, without guaranteeing that a request fits. At 32768, do not increase it: CDS's conservative request byte budget is distinct from the model's token capacity. This prevents a partial source set being used for a whole-case question; it does not verify generated meaning or guarantee that all details fit. Concept questions remain available. Assessment generation also rejects whole-source omissions before calling the model; omitted details within represented sources are disclosed with counts and IDs.
